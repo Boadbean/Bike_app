@@ -21,7 +21,7 @@ class RideRepository {
     final path = _explicitPath ?? join(await getDatabasesPath(), 'bike_assist_rides.db');
     return openDatabase(
       path,
-      version: 1,
+      version: 2,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE rides (
@@ -40,7 +40,31 @@ class RideRepository {
             timestamp TEXT NOT NULL
           )
         ''');
+        await _createFramesTable(db);
       },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        // v1 → v2 added camera frame recording. Rides recorded before the
+        // upgrade simply have no frames, which playback handles.
+        if (oldVersion < 2) {
+          await _createFramesTable(db);
+        }
+      },
+    );
+  }
+
+  /// Index of recorded camera frames. Only the timestamp is stored — the image
+  /// bytes live on disk (see [RideFrameStore]) and the path is derived, since
+  /// absolute paths can change between app installs.
+  static Future<void> _createFramesTable(Database db) async {
+    await db.execute('''
+      CREATE TABLE ride_frames (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ride_id INTEGER NOT NULL,
+        timestamp TEXT NOT NULL
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX idx_ride_frames_ride_time ON ride_frames (ride_id, timestamp)',
     );
   }
 
@@ -103,6 +127,47 @@ class RideRepository {
               timestamp: DateTime.parse(row['timestamp'] as String),
             ))
         .toList();
+  }
+
+  /// Indexes a batch of recorded frame timestamps in one transaction. Frames
+  /// arrive at up to 15/s, so [RideRecorder] buffers them and flushes here
+  /// rather than issuing an insert per frame.
+  Future<void> addFrames(int rideId, List<DateTime> timestamps) async {
+    if (timestamps.isEmpty) return;
+    final db = await _database;
+    final batch = db.batch();
+    for (final timestamp in timestamps) {
+      batch.insert('ride_frames', {
+        'ride_id': rideId,
+        'timestamp': timestamp.toIso8601String(),
+      });
+    }
+    await batch.commit(noResult: true);
+  }
+
+  /// Timestamps of every frame recorded for [rideId], oldest first. Combine
+  /// with [RideFrameStore.frameFile] to get the image on disk.
+  Future<List<DateTime>> loadFrameTimestamps(int rideId) async {
+    final db = await _database;
+    final rows = await db.query(
+      'ride_frames',
+      columns: ['timestamp'],
+      where: 'ride_id = ?',
+      whereArgs: [rideId],
+      orderBy: 'timestamp ASC',
+    );
+    return rows.map((row) => DateTime.parse(row['timestamp'] as String)).toList();
+  }
+
+  /// Removes the ride and all of its points and frame index rows. The frame
+  /// image files are deleted separately via [RideFrameStore.deleteRideFrames].
+  Future<void> deleteRide(int rideId) async {
+    final db = await _database;
+    await db.transaction((txn) async {
+      await txn.delete('ride_frames', where: 'ride_id = ?', whereArgs: [rideId]);
+      await txn.delete('ride_points', where: 'ride_id = ?', whereArgs: [rideId]);
+      await txn.delete('rides', where: 'id = ?', whereArgs: [rideId]);
+    });
   }
 
   /// Closes out any ride left with a null `end_time` from a previous session

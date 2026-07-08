@@ -5,8 +5,8 @@ import 'package:flutter/material.dart';
 
 import '../models/bike_data.dart';
 import '../services/bike_data_service.dart';
-import '../services/camera_stream_service.dart';
-import '../services/http_mjpeg_camera_stream_service.dart';
+import '../services/camera_source.dart';
+import '../services/ride_frame_store.dart';
 import '../services/ride_recorder.dart';
 import '../services/ride_repository.dart';
 import '../widgets/mjpeg_view.dart';
@@ -15,19 +15,21 @@ import '../widgets/stat_card.dart';
 import 'device_wifi_setup_screen.dart';
 import 'ride_list_screen.dart';
 
-enum _CameraMode { mock, connecting, connected, error }
-
 /// Single-page layout: camera stream on top, live dashboard below.
 class HomeScreen extends StatefulWidget {
   const HomeScreen({
     super.key,
     required this.dataService,
+    required this.cameraSource,
     required this.repository,
+    required this.frameStore,
     required this.recorder,
   });
 
   final BikeDataService dataService;
+  final CameraSource cameraSource;
   final RideRepository repository;
+  final RideFrameStore frameStore;
   final RideRecorder recorder;
 
   @override
@@ -35,68 +37,27 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  late CameraStreamService _cameraService;
-  StreamSubscription<Uint8List>? _cameraSubscription;
   final _displayController = StreamController<Uint8List>.broadcast();
   final _ipController = TextEditingController();
+  StreamSubscription<Uint8List>? _cameraSubscription;
 
-  _CameraMode _mode = _CameraMode.mock;
-  String? _errorMessage;
+  /// Display-only: pausing the live view does not pause ride recording.
   bool _paused = false;
 
   @override
   void initState() {
     super.initState();
-    _cameraService = MockCameraStreamService();
-    _bindCamera(isMock: true);
+    _cameraSubscription = widget.cameraSource.frames.listen((frame) {
+      if (!_paused) _displayController.add(frame);
+    });
   }
 
   @override
   void dispose() {
     _cameraSubscription?.cancel();
     _displayController.close();
-    _cameraService.dispose();
     _ipController.dispose();
     super.dispose();
-  }
-
-  void _bindCamera({required bool isMock}) {
-    _cameraSubscription?.cancel();
-    _cameraSubscription = _cameraService.frames.listen(
-      (frame) {
-        if (!_paused) {
-          _displayController.add(frame);
-        }
-        if (!isMock && _mode != _CameraMode.connected) {
-          setState(() => _mode = _CameraMode.connected);
-        }
-      },
-      onError: (Object error) {
-        setState(() {
-          _mode = _CameraMode.error;
-          _errorMessage = error.toString();
-        });
-      },
-      onDone: () {
-        if (!isMock) {
-          setState(() {
-            _mode = _CameraMode.error;
-            _errorMessage = '連線已中斷';
-          });
-        }
-      },
-    );
-  }
-
-  void _useMockCamera() {
-    _cameraSubscription?.cancel();
-    _cameraService.dispose();
-    setState(() {
-      _cameraService = MockCameraStreamService();
-      _mode = _CameraMode.mock;
-      _errorMessage = null;
-    });
-    _bindCamera(isMock: true);
   }
 
   void _connectToDevice(String input) {
@@ -105,15 +66,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final uri = trimmed.startsWith('http')
         ? Uri.parse(trimmed)
         : Uri.parse('http://$trimmed/stream');
-
-    _cameraSubscription?.cancel();
-    _cameraService.dispose();
-    setState(() {
-      _cameraService = HttpMjpegCameraStreamService(uri);
-      _mode = _CameraMode.connecting;
-      _errorMessage = null;
-    });
-    _bindCamera(isMock: false);
+    widget.cameraSource.connect(uri);
   }
 
   Future<void> _showConnectDialog() async {
@@ -155,7 +108,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     if (result == null) return;
     if (result == 'mock') {
-      _useMockCamera();
+      widget.cameraSource.useMock();
     } else if (result == 'setup') {
       await _openDeviceSetup();
     } else {
@@ -196,6 +149,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 MaterialPageRoute(
                   builder: (_) => RideListScreen(
                     repository: widget.repository,
+                    frameStore: widget.frameStore,
                     recorder: widget.recorder,
                   ),
                 ),
@@ -217,14 +171,17 @@ class _HomeScreenState extends State<HomeScreen> {
                   Positioned(
                     top: 8,
                     right: 8,
-                    child: Chip(
-                      avatar: Icon(
-                        Icons.circle,
-                        size: 12,
-                        color: _statusColor,
+                    child: ValueListenableBuilder<CameraMode>(
+                      valueListenable: widget.cameraSource.mode,
+                      builder: (context, mode, _) => Chip(
+                        avatar: Icon(
+                          Icons.circle,
+                          size: 12,
+                          color: _statusColor(mode),
+                        ),
+                        label: Text(_statusLabel(mode)),
+                        visualDensity: VisualDensity.compact,
                       ),
-                      label: Text(_statusLabel),
-                      visualDensity: VisualDensity.compact,
                     ),
                   ),
                   Positioned(
@@ -299,30 +256,31 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Color get _statusColor {
+  Color _statusColor(CameraMode mode) {
     if (_paused) return Colors.orange;
-    switch (_mode) {
-      case _CameraMode.mock:
-      case _CameraMode.connected:
+    switch (mode) {
+      case CameraMode.mock:
+      case CameraMode.connected:
         return Colors.green;
-      case _CameraMode.connecting:
+      case CameraMode.connecting:
         return Colors.blue;
-      case _CameraMode.error:
+      case CameraMode.error:
         return Colors.red;
     }
   }
 
-  String get _statusLabel {
+  String _statusLabel(CameraMode mode) {
     if (_paused) return '已暫停';
-    switch (_mode) {
-      case _CameraMode.mock:
+    switch (mode) {
+      case CameraMode.mock:
         return '串流狀態:模擬中';
-      case _CameraMode.connecting:
+      case CameraMode.connecting:
         return '連線中...';
-      case _CameraMode.connected:
+      case CameraMode.connected:
         return 'ESP32 連線中';
-      case _CameraMode.error:
-        return _errorMessage == null ? '連線失敗' : '連線失敗:$_errorMessage';
+      case CameraMode.error:
+        final error = widget.cameraSource.errorMessage.value;
+        return error == null ? '連線失敗' : '連線失敗:$error';
     }
   }
 

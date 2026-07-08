@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import 'screens/home_screen.dart';
 import 'services/bike_data_service.dart';
+import 'services/camera_source.dart';
+import 'services/ride_frame_store.dart';
 import 'services/ride_recorder.dart';
 import 'services/ride_repository.dart';
 
@@ -10,7 +12,21 @@ void main() {
 }
 
 class BikeAssistApp extends StatefulWidget {
-  const BikeAssistApp({super.key});
+  const BikeAssistApp({
+    super.key,
+    this.repository,
+    this.frameStore,
+    this.autoStartRecording = true,
+  });
+
+  /// Injectable so tests can supply an in-memory database / temp directory.
+  final RideRepository? repository;
+  final RideFrameStore? frameStore;
+
+  /// Widget tests turn this off: recording writes frames and database rows on
+  /// real async I/O, which never completes under the widget-test fake-async
+  /// clock and would leave operations queued on the sqflite isolate.
+  final bool autoStartRecording;
 
   @override
   State<BikeAssistApp> createState() => _BikeAssistAppState();
@@ -18,17 +34,21 @@ class BikeAssistApp extends StatefulWidget {
 
 class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserver {
   late final BikeDataService _dataService = MockBikeDataService();
-  late final RideRepository _repository = RideRepository();
+  late final CameraSource _cameraSource = CameraSource();
+  late final RideRepository _repository = widget.repository ?? RideRepository();
+  late final RideFrameStore _frameStore = widget.frameStore ?? RideFrameStore();
   late final RideRecorder _recorder = RideRecorder(
     dataService: _dataService,
     repository: _repository,
+    cameraSource: _cameraSource,
+    frameStore: _frameStore,
   );
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _recorder.init();
+    if (widget.autoStartRecording) _recorder.init();
   }
 
   @override
@@ -42,6 +62,7 @@ class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserv
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _recorder.dispose();
+    _cameraSource.dispose();
     _dataService.dispose();
     _repository.close();
     super.dispose();
@@ -57,7 +78,9 @@ class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserv
       ),
       home: HomeScreen(
         dataService: _dataService,
+        cameraSource: _cameraSource,
         repository: _repository,
+        frameStore: _frameStore,
         recorder: _recorder,
       ),
     );

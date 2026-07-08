@@ -1,21 +1,25 @@
 import 'package:flutter/material.dart';
 
 import '../models/ride.dart';
+import '../services/ride_frame_store.dart';
 import '../services/ride_recorder.dart';
 import '../services/ride_repository.dart';
 import 'ride_playback_screen.dart';
 
 /// Lists every recorded ride and lets the user start/stop the current
-/// recording. Leaving this screen while recording is stopped prompts the
-/// user to confirm whether they meant to start a new one.
+/// recording, replay a ride, or delete one (with its recorded footage).
+/// Leaving this screen while recording is stopped prompts the user to confirm
+/// whether they meant to start a new one.
 class RideListScreen extends StatefulWidget {
   const RideListScreen({
     super.key,
     required this.repository,
+    required this.frameStore,
     required this.recorder,
   });
 
   final RideRepository repository;
+  final RideFrameStore frameStore;
   final RideRecorder recorder;
 
   @override
@@ -43,6 +47,41 @@ class _RideListScreenState extends State<RideListScreen> {
     } else {
       await widget.recorder.start();
     }
+    _refresh();
+  }
+
+  Future<bool> _confirmDelete(Ride ride) async {
+    final choice = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('刪除這筆記錄?'),
+        content: Text(
+          '${_formatDateTime(ride.startTime)} 的路線與該趟錄下的影像都會被刪除,無法復原。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('刪除'),
+          ),
+        ],
+      ),
+    );
+    return choice ?? false;
+  }
+
+  /// Removes the ride's rows and its recorded frame files. Frames are deleted
+  /// after the database rows so a failure mid-way leaves orphaned files (which
+  /// are harmless) rather than database rows pointing at missing images.
+  Future<void> _deleteRide(int rideId) async {
+    await widget.repository.deleteRide(rideId);
+    await widget.frameStore.deleteRideFrames(rideId);
     _refresh();
   }
 
@@ -105,7 +144,7 @@ class _RideListScreenState extends State<RideListScreen> {
                     itemCount: rides.length,
                     itemBuilder: (context, index) {
                       final ride = rides[index];
-                      return ListTile(
+                      final tile = ListTile(
                         leading: Icon(
                           ride.isActive ? Icons.fiber_manual_record : Icons.route,
                           color: ride.isActive ? Colors.red : null,
@@ -120,11 +159,33 @@ class _RideListScreenState extends State<RideListScreen> {
                               builder: (_) => RidePlaybackScreen(
                                 rideId: ride.id,
                                 repository: widget.repository,
+                                frameStore: widget.frameStore,
                               ),
                             ),
                           );
                           _refresh();
                         },
+                      );
+
+                      // The in-progress ride can't be deleted out from under
+                      // the recorder — stop it first.
+                      if (ride.isActive) return tile;
+
+                      return Dismissible(
+                        key: ValueKey(ride.id),
+                        direction: DismissDirection.endToStart,
+                        background: Container(
+                          alignment: Alignment.centerRight,
+                          padding: const EdgeInsets.only(right: 24),
+                          color: Theme.of(context).colorScheme.error,
+                          child: Icon(
+                            Icons.delete,
+                            color: Theme.of(context).colorScheme.onError,
+                          ),
+                        ),
+                        confirmDismiss: (_) => _confirmDelete(ride),
+                        onDismissed: (_) => _deleteRide(ride.id),
+                        child: tile,
                       );
                     },
                   );

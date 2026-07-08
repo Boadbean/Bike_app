@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,9 +12,12 @@ import 'package:flutter_application_1/models/route_point.dart';
 import 'package:flutter_application_1/screens/device_wifi_setup_screen.dart';
 import 'package:flutter_application_1/screens/ride_list_screen.dart';
 import 'package:flutter_application_1/services/bike_data_service.dart';
+import 'package:flutter_application_1/services/camera_source.dart';
 import 'package:flutter_application_1/services/device_provisioning.dart';
+import 'package:flutter_application_1/services/ride_frame_store.dart';
 import 'package:flutter_application_1/services/ride_recorder.dart';
 import 'package:flutter_application_1/services/ride_repository.dart';
+import 'package:flutter_application_1/utils/timeline.dart';
 
 class _FakeBikeDataService implements BikeDataService {
   final _controller = StreamController<BikeData>.broadcast();
@@ -30,8 +35,18 @@ void main() {
     databaseFactory = databaseFactoryFfi;
   });
 
+  /// An app wired to an in-memory database and a temp frame directory, with
+  /// background recording off. Recording performs real file + database writes,
+  /// which never complete under the widget-test fake-async clock and would
+  /// leave operations stuck on the sqflite isolate, hanging every later test.
+  BikeAssistApp testApp() => BikeAssistApp(
+        repository: RideRepository(path: inMemoryDatabasePath),
+        frameStore: RideFrameStore(baseDir: Directory.systemTemp),
+        autoStartRecording: false,
+      );
+
   testWidgets('shows camera stream and dashboard on one page', (WidgetTester tester) async {
-    await tester.pumpWidget(const BikeAssistApp());
+    await tester.pumpWidget(testApp());
     await tester.pump(const Duration(milliseconds: 600));
 
     expect(find.text('bike-assist'), findsOneWidget);
@@ -45,7 +60,7 @@ void main() {
   });
 
   testWidgets('navigates to the ride history list screen', (WidgetTester tester) async {
-    await tester.pumpWidget(const BikeAssistApp());
+    await tester.pumpWidget(testApp());
     await tester.pump(const Duration(milliseconds: 600));
 
     await tester.tap(find.byIcon(Icons.map_outlined));
@@ -108,7 +123,14 @@ void main() {
   testWidgets('leaving the list screen while stopped prompts to restart', (tester) async {
     final repository = RideRepository(path: inMemoryDatabasePath);
     final dataService = _FakeBikeDataService();
-    final recorder = RideRecorder(dataService: dataService, repository: repository);
+    final cameraSource = CameraSource();
+    final frameStore = RideFrameStore(baseDir: Directory.systemTemp);
+    final recorder = RideRecorder(
+      dataService: dataService,
+      repository: repository,
+      cameraSource: cameraSource,
+      frameStore: frameStore,
+    );
     // recorder.isRecording defaults to false — the "manually stopped" state.
     // We deliberately avoid awaiting any sqflite call inside this testWidgets
     // body: under the fake-async clock the DB isolate's reply is never
@@ -122,7 +144,11 @@ void main() {
               child: FilledButton(
                 onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute(
-                    builder: (_) => RideListScreen(repository: repository, recorder: recorder),
+                    builder: (_) => RideListScreen(
+                      repository: repository,
+                      frameStore: frameStore,
+                      recorder: recorder,
+                    ),
                   ),
                 ),
                 child: const Text('open'),
@@ -158,6 +184,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     dataService.dispose();
+    cameraSource.dispose(); // its mock camera runs a Timer.periodic
     // Close the DB via runAsync so the ffi isolate's reply is delivered and
     // the process can exit cleanly.
     await tester.runAsync(() => repository.close());
@@ -226,5 +253,132 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.textContaining('帳密已儲存'), findsOneWidget);
+  });
+
+  group('latestIndexAtOrBefore', () {
+    final times = [
+      DateTime(2026, 1, 1, 8, 0, 0),
+      DateTime(2026, 1, 1, 8, 0, 1),
+      DateTime(2026, 1, 1, 8, 0, 2),
+    ];
+
+    test('returns -1 for an empty list', () {
+      expect(latestIndexAtOrBefore([], DateTime(2026)), -1);
+    });
+
+    test('returns -1 when the target precedes every entry', () {
+      expect(latestIndexAtOrBefore(times, DateTime(2026, 1, 1, 7, 59, 59)), -1);
+    });
+
+    test('returns the last index when the target is past the end', () {
+      expect(latestIndexAtOrBefore(times, DateTime(2026, 1, 1, 9)), 2);
+    });
+
+    test('returns the exact index on a direct hit', () {
+      expect(latestIndexAtOrBefore(times, DateTime(2026, 1, 1, 8, 0, 1)), 1);
+    });
+
+    test('returns the preceding index when the target falls between entries', () {
+      expect(
+        latestIndexAtOrBefore(times, DateTime(2026, 1, 1, 8, 0, 1, 500)),
+        1,
+      );
+    });
+  });
+
+  group('RideFrameStore', () {
+    late Directory tempDir;
+    late RideFrameStore store;
+
+    setUp(() async {
+      tempDir = await Directory.systemTemp.createTemp('bike_frames_test');
+      store = RideFrameStore(baseDir: tempDir);
+    });
+
+    tearDown(() async {
+      if (await tempDir.exists()) await tempDir.delete(recursive: true);
+    });
+
+    test('saves a frame and derives its path from rideId + timestamp', () async {
+      final timestamp = DateTime(2026, 1, 1, 8, 0, 0);
+      await store.saveFrame(7, Uint8List.fromList([1, 2, 3]), timestamp);
+
+      final file = await store.frameFile(7, timestamp);
+      expect(await file.exists(), isTrue);
+      expect(await file.readAsBytes(), [1, 2, 3]);
+      expect(file.path, endsWith('${timestamp.millisecondsSinceEpoch}.jpg'));
+    });
+
+    test('deleteRideFrames removes the whole ride directory', () async {
+      await store.saveFrame(7, Uint8List.fromList([1]), DateTime(2026, 1, 1, 8));
+      await store.saveFrame(7, Uint8List.fromList([2]), DateTime(2026, 1, 1, 8, 0, 1));
+
+      await store.deleteRideFrames(7);
+
+      expect(await (await store.rideDir(7)).exists(), isFalse);
+    });
+
+    test('deleteRideFrames is a no-op when the ride has no frames', () async {
+      await store.deleteRideFrames(999); // must not throw
+    });
+  });
+
+  group('RideRepository frames & delete', () {
+    late RideRepository repository;
+
+    setUp(() {
+      repository = RideRepository(path: inMemoryDatabasePath);
+    });
+
+    tearDown(() => repository.close());
+
+    test('addFrames indexes timestamps and loads them in order', () async {
+      final rideId = await repository.startRide();
+      await repository.addFrames(rideId, [
+        DateTime(2026, 1, 1, 8, 0, 2),
+        DateTime(2026, 1, 1, 8, 0, 0),
+        DateTime(2026, 1, 1, 8, 0, 1),
+      ]);
+
+      final frames = await repository.loadFrameTimestamps(rideId);
+      expect(frames, [
+        DateTime(2026, 1, 1, 8, 0, 0),
+        DateTime(2026, 1, 1, 8, 0, 1),
+        DateTime(2026, 1, 1, 8, 0, 2),
+      ]);
+    });
+
+    test('addFrames with an empty list is a no-op', () async {
+      final rideId = await repository.startRide();
+      await repository.addFrames(rideId, []);
+      expect(await repository.loadFrameTimestamps(rideId), isEmpty);
+    });
+
+    test('deleteRide clears the ride, its points and its frame index', () async {
+      final rideId = await repository.startRide();
+      await repository.addPoint(
+        rideId,
+        RoutePoint(lat: 25, lng: 121, speedKmh: 10, timestamp: DateTime(2026, 1, 1, 8)),
+      );
+      await repository.addFrames(rideId, [DateTime(2026, 1, 1, 8)]);
+
+      await repository.deleteRide(rideId);
+
+      expect(await repository.listRides(), isEmpty);
+      expect(await repository.loadPoints(rideId), isEmpty);
+      expect(await repository.loadFrameTimestamps(rideId), isEmpty);
+    });
+
+    test('deleting one ride leaves other rides intact', () async {
+      final keep = await repository.startRide();
+      final drop = await repository.startRide();
+      await repository.addFrames(keep, [DateTime(2026, 1, 1, 8)]);
+      await repository.addFrames(drop, [DateTime(2026, 1, 1, 9)]);
+
+      await repository.deleteRide(drop);
+
+      expect((await repository.listRides()).single.id, keep);
+      expect(await repository.loadFrameTimestamps(keep), hasLength(1));
+    });
   });
 }
