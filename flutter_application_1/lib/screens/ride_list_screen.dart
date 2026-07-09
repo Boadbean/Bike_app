@@ -27,18 +27,23 @@ class RideListScreen extends StatefulWidget {
 }
 
 class _RideListScreenState extends State<RideListScreen> {
-  late Future<List<Ride>> _ridesFuture;
+  /// null while the first load is in flight; the list is held in state (rather
+  /// than read straight from a FutureBuilder) so a swiped ride can be removed
+  /// synchronously in [Dismissible.onDismissed] — otherwise the framework
+  /// asserts "A dismissed Dismissible widget is still part of the tree" and
+  /// flashes a red error screen until the async reload lands.
+  List<Ride>? _rides;
 
   @override
   void initState() {
     super.initState();
-    _ridesFuture = widget.repository.listRides();
+    _load();
   }
 
-  void _refresh() {
-    setState(() {
-      _ridesFuture = widget.repository.listRides();
-    });
+  Future<void> _load() async {
+    final rides = await widget.repository.listRides();
+    if (!mounted) return;
+    setState(() => _rides = rides);
   }
 
   Future<void> _toggleRecording() async {
@@ -47,7 +52,7 @@ class _RideListScreenState extends State<RideListScreen> {
     } else {
       await widget.recorder.start();
     }
-    _refresh();
+    await _load();
   }
 
   Future<bool> _confirmDelete(Ride ride) async {
@@ -76,13 +81,19 @@ class _RideListScreenState extends State<RideListScreen> {
     return choice ?? false;
   }
 
-  /// Removes the ride's rows and its recorded frame files. Frames are deleted
-  /// after the database rows so a failure mid-way leaves orphaned files (which
-  /// are harmless) rather than database rows pointing at missing images.
+  /// Removes the ride from the visible list *synchronously* (so the Dismissible
+  /// is satisfied), then deletes its rows and recorded frame files in the
+  /// background. Frames are deleted after the database rows so a failure mid-way
+  /// leaves orphaned files (harmless) rather than rows pointing at missing
+  /// images. If the delete fails, the list is reloaded to resync.
   Future<void> _deleteRide(int rideId) async {
-    await widget.repository.deleteRide(rideId);
-    await widget.frameStore.deleteRideFrames(rideId);
-    _refresh();
+    setState(() => _rides?.removeWhere((ride) => ride.id == rideId));
+    try {
+      await widget.repository.deleteRide(rideId);
+      await widget.frameStore.deleteRideFrames(rideId);
+    } catch (_) {
+      await _load();
+    }
   }
 
   Future<bool> _confirmLeaveWithoutRestarting() async {
@@ -115,7 +126,7 @@ class _RideListScreenState extends State<RideListScreen> {
         final shouldRestart = await _confirmLeaveWithoutRestarting();
         if (shouldRestart) {
           await widget.recorder.start();
-          _refresh();
+          await _load();
         }
         if (context.mounted) {
           Navigator.of(context).pop();
@@ -130,10 +141,9 @@ class _RideListScreenState extends State<RideListScreen> {
               onToggle: _toggleRecording,
             ),
             Expanded(
-              child: FutureBuilder<List<Ride>>(
-                future: _ridesFuture,
-                builder: (context, snapshot) {
-                  final rides = snapshot.data;
+              child: Builder(
+                builder: (context) {
+                  final rides = _rides;
                   if (rides == null) {
                     return const Center(child: CircularProgressIndicator());
                   }
@@ -163,7 +173,7 @@ class _RideListScreenState extends State<RideListScreen> {
                               ),
                             ),
                           );
-                          _refresh();
+                          await _load();
                         },
                       );
 
