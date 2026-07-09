@@ -14,6 +14,7 @@ import '../widgets/mjpeg_view.dart';
 import '../widgets/speed_gauge.dart';
 import '../widgets/stat_card.dart';
 import 'device_wifi_setup_screen.dart';
+import 'no_connection_view.dart';
 import 'ride_list_screen.dart';
 
 /// Single-page layout: camera stream on top, live dashboard below.
@@ -72,11 +73,19 @@ class _HomeScreenState extends State<HomeScreen> {
     widget.dataSource.connect(base);
   }
 
+  /// Drops both the camera and telemetry connections, returning to the
+  /// no-connection view. Recording stops via the connection listener in main.
+  void _disconnect() {
+    widget.cameraSource.disconnect();
+    widget.dataSource.disconnect();
+  }
+
   Future<void> _showConnectDialog() async {
+    final isConnected = widget.cameraSource.mode.value != CameraMode.disconnected;
     final result = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('連接鏡頭裝置'),
+        title: const Text('連接裝置'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -100,10 +109,11 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop('mock'),
-            child: const Text('使用模擬串流'),
-          ),
+          if (isConnected)
+            TextButton(
+              onPressed: () => Navigator.of(context).pop('disconnect'),
+              child: const Text('中斷連線'),
+            ),
           FilledButton(
             onPressed: () => Navigator.of(context).pop(_ipController.text),
             child: const Text('連線'),
@@ -112,9 +122,8 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
     if (result == null) return;
-    if (result == 'mock') {
-      widget.cameraSource.useMock();
-      widget.dataSource.useMock();
+    if (result == 'disconnect') {
+      _disconnect();
     } else if (result == 'setup') {
       await _openDeviceSetup();
     } else {
@@ -164,7 +173,28 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      body: Column(
+      body: ValueListenableBuilder<CameraMode>(
+        valueListenable: widget.cameraSource.mode,
+        builder: (context, mode, _) {
+          final connectingOrLive =
+              mode == CameraMode.connecting || mode == CameraMode.connected;
+          if (!connectingOrLive) {
+            return NoConnectionView(
+              onConnect: _showConnectDialog,
+              onSetup: _openDeviceSetup,
+              errorMessage: mode == CameraMode.error
+                  ? widget.cameraSource.errorMessage.value
+                  : null,
+            );
+          }
+          return _buildLiveLayout(context);
+        },
+      ),
+    );
+  }
+
+  Widget _buildLiveLayout(BuildContext context) {
+    return Column(
         children: [
           Expanded(
             flex: 4,
@@ -258,28 +288,28 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ],
-      ),
-    );
+      );
   }
 
   Color _statusColor(CameraMode mode) {
     if (_paused) return Colors.orange;
     switch (mode) {
-      case CameraMode.mock:
       case CameraMode.connected:
         return Colors.green;
       case CameraMode.connecting:
         return Colors.blue;
       case CameraMode.error:
         return Colors.red;
+      case CameraMode.disconnected:
+        return Colors.grey;
     }
   }
 
   String _statusLabel(CameraMode mode) {
     if (_paused) return '已暫停';
     switch (mode) {
-      case CameraMode.mock:
-        return '串流狀態:模擬中';
+      case CameraMode.disconnected:
+        return '未連線';
       case CameraMode.connecting:
         return '連線中...';
       case CameraMode.connected:
@@ -385,7 +415,7 @@ class _ConnectionChip extends StatelessWidget {
       valueListenable: dataSource.mode,
       builder: (context, mode, _) {
         final (color, label) = switch (mode) {
-          TelemetryMode.mock => (Colors.green, '模擬資料連線中'),
+          TelemetryMode.disconnected => (Colors.grey, '未連線'),
           TelemetryMode.connecting => (Colors.blue, '數據連線中...'),
           TelemetryMode.connected => (Colors.green, '裝置數據連線中'),
           TelemetryMode.error => (Colors.red, '數據連線失敗'),

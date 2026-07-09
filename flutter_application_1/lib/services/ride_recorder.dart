@@ -50,13 +50,6 @@ class RideRecorder {
   Duration get _minFrameGap =>
       Duration(microseconds: Duration.microsecondsPerSecond ~/ maxFramesPerSecond);
 
-  /// Cleans up any ride orphaned by an unclean shutdown, then starts a new
-  /// recording. Call once when the app launches.
-  Future<void> init() async {
-    await repository.closeOrphanRides();
-    await start();
-  }
-
   Future<void> start() async {
     if (isRecording.value) return;
     final rideId = await repository.startRide();

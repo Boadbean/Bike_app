@@ -45,17 +45,20 @@ void main() {
   BikeAssistApp testApp() => BikeAssistApp(
         repository: RideRepository(path: inMemoryDatabasePath),
         frameStore: RideFrameStore(baseDir: Directory.systemTemp),
-        autoStartRecording: false,
+        recordingEnabled: false,
       );
 
-  testWidgets('shows camera stream and dashboard on one page', (WidgetTester tester) async {
+  testWidgets('starts on the no-connection view before a device is connected',
+      (WidgetTester tester) async {
     await tester.pumpWidget(testApp());
     await tester.pump(const Duration(milliseconds: 600));
 
     expect(find.text('bike-assist'), findsOneWidget);
-    expect(find.text('串流狀態:模擬中'), findsOneWidget);
-    expect(find.text('傾角'), findsOneWidget);
-    expect(find.text('緯度'), findsOneWidget);
+    // No mock data any more: the app opens disconnected.
+    expect(find.text('尚未連接裝置'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, '連接裝置'), findsOneWidget);
+    // The live dashboard is not shown until connected.
+    expect(find.text('傾角'), findsNothing);
 
     // Force the BikeAssistApp (and its sqflite-backed RideRepository) to
     // dispose now, instead of leaking its DB isolate past this test.

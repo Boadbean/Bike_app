@@ -16,17 +16,19 @@ class BikeAssistApp extends StatefulWidget {
     super.key,
     this.repository,
     this.frameStore,
-    this.autoStartRecording = true,
+    this.recordingEnabled = true,
   });
 
   /// Injectable so tests can supply an in-memory database / temp directory.
   final RideRepository? repository;
   final RideFrameStore? frameStore;
 
-  /// Widget tests turn this off: recording writes frames and database rows on
-  /// real async I/O, which never completes under the widget-test fake-async
-  /// clock and would leave operations queued on the sqflite isolate.
-  final bool autoStartRecording;
+  /// Enables ride recording: cleans up orphaned rides on launch and records
+  /// while a device is connected. Widget tests turn this off — recording
+  /// writes frames and database rows on real async I/O, which never completes
+  /// under the widget-test fake-async clock and would leave operations queued
+  /// on the sqflite isolate.
+  final bool recordingEnabled;
 
   @override
   State<BikeAssistApp> createState() => _BikeAssistAppState();
@@ -48,7 +50,29 @@ class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserv
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    if (widget.autoStartRecording) _recorder.init();
+    if (widget.recordingEnabled) {
+      // Close any ride left open by an unclean shutdown, then record only
+      // while a device is connected.
+      _repository.closeOrphanRides();
+      _cameraSource.mode.addListener(_syncRecordingWithConnection);
+      _dataSource.mode.addListener(_syncRecordingWithConnection);
+    }
+  }
+
+  /// Records only while a device is connected: starts when the camera or
+  /// telemetry goes live, stops once both are down (disconnected/error).
+  /// Neither starts nor stops during the transient connecting phase.
+  void _syncRecordingWithConnection() {
+    final connected = _cameraSource.mode.value == CameraMode.connected ||
+        _dataSource.mode.value == TelemetryMode.connected;
+    final connecting = _cameraSource.mode.value == CameraMode.connecting ||
+        _dataSource.mode.value == TelemetryMode.connecting;
+
+    if (connected && !_recorder.isRecording.value) {
+      _recorder.start();
+    } else if (!connected && !connecting && _recorder.isRecording.value) {
+      _recorder.stop();
+    }
   }
 
   @override
@@ -61,6 +85,8 @@ class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserv
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _cameraSource.mode.removeListener(_syncRecordingWithConnection);
+    _dataSource.mode.removeListener(_syncRecordingWithConnection);
     _recorder.dispose();
     _cameraSource.dispose();
     _dataSource.dispose();
