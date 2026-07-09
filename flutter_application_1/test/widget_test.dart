@@ -4,6 +4,8 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:flutter_application_1/main.dart';
@@ -13,6 +15,7 @@ import 'package:flutter_application_1/screens/device_wifi_setup_screen.dart';
 import 'package:flutter_application_1/screens/ride_list_screen.dart';
 import 'package:flutter_application_1/services/bike_data_service.dart';
 import 'package:flutter_application_1/services/camera_source.dart';
+import 'package:flutter_application_1/services/http_status_bike_data_service.dart';
 import 'package:flutter_application_1/services/device_provisioning.dart';
 import 'package:flutter_application_1/services/ride_frame_store.dart';
 import 'package:flutter_application_1/services/ride_recorder.dart';
@@ -379,6 +382,92 @@ void main() {
 
       expect((await repository.listRides()).single.id, keep);
       expect(await repository.loadFrameTimestamps(keep), hasLength(1));
+    });
+  });
+
+  group('BikeData.fromStatusJson', () {
+    // A representative /api/status payload from the main.cpp firmware.
+    final status = <String, dynamic>{
+      'wifi': 'sta',
+      'ip': '192.168.137.34',
+      'imu': {'ok': true, 'roll': 1.2, 'pitch': -0.5, 'ax': 0.01, 'ay': 0.02, 'az': 0.99},
+      'accel': {'event': 'BRAKE', 'magnitude': 2.3},
+      'gps': {'chars': 1234, 'fix': true, 'lat': 23.99, 'lon': 121.60, 'speed': 12.5},
+      'led': {'direction': 'LEFT', 'manual': false},
+      'sd': {'ok': true, 'sizeMB': 60350},
+      'camera': true,
+    };
+
+    test('maps core motion and GPS fields (lon -> lng, no gyro)', () {
+      final data = BikeData.fromStatusJson(status);
+      expect(data.ax, 0.01);
+      expect(data.az, 0.99);
+      expect(data.lat, 23.99);
+      expect(data.lng, 121.60); // firmware sends longitude as "lon"
+      expect(data.speedKmh, 12.5);
+      expect(data.gx, 0); // /api/status carries no gyroscope
+    });
+
+    test('carries the extra firmware fields through', () {
+      final data = BikeData.fromStatusJson(status);
+      expect(data.roll, 1.2);
+      expect(data.pitch, -0.5);
+      expect(data.accelEvent, 'BRAKE');
+      expect(data.accelMagnitude, 2.3);
+      expect(data.ledDirection, 'LEFT');
+      expect(data.ledManual, isFalse);
+      expect(data.gpsFix, isTrue);
+    });
+
+    test('missing objects default numbers to 0 and extras to null', () {
+      final data = BikeData.fromStatusJson(const {});
+      expect(data.lat, 0);
+      expect(data.speedKmh, 0);
+      expect(data.roll, isNull);
+      expect(data.accelEvent, isNull);
+      expect(data.ledManual, isNull);
+      expect(data.gpsFix, isNull);
+    });
+  });
+
+  group('HttpStatusBikeDataService', () {
+    test('polls /api/status and emits parsed BikeData', () async {
+      Uri? requested;
+      final client = MockClient((request) async {
+        requested = request.url;
+        return http.Response(
+          '{"imu":{"ax":0.1,"ay":0.0,"az":1.0,"roll":5.0},'
+          '"accel":{"event":"NORMAL","magnitude":1.0},'
+          '"gps":{"fix":true,"lat":25.0,"lon":121.5,"speed":8.0},'
+          '"led":{"direction":"NONE","manual":false}}',
+          200,
+        );
+      });
+      final service = HttpStatusBikeDataService(
+        Uri.parse('http://192.168.1.42'),
+        client: client,
+        pollInterval: const Duration(milliseconds: 50),
+      );
+      addTearDown(service.dispose);
+
+      final data = await service.stream.first;
+      expect(requested.toString(), 'http://192.168.1.42/api/status');
+      expect(data.lat, 25.0);
+      expect(data.lng, 121.5);
+      expect(data.speedKmh, 8.0);
+      expect(data.roll, 5.0);
+    });
+
+    test('forwards a non-200 response as a stream error', () async {
+      final client = MockClient((request) async => http.Response('nope', 503));
+      final service = HttpStatusBikeDataService(
+        Uri.parse('http://192.168.1.42'),
+        client: client,
+        pollInterval: const Duration(milliseconds: 50),
+      );
+      addTearDown(service.dispose);
+
+      await expectLater(service.stream.first, throwsA(isA<String>()));
     });
   });
 }

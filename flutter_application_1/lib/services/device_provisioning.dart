@@ -30,6 +30,12 @@ typedef ProvisionFn = Future<ProvisionResult> Function(String ssid, String passw
 /// Default setup-AP endpoint served by the firmware (`WiFi.softAPIP()`).
 const String kProvisionUrl = 'http://192.168.4.1/provision';
 
+/// The setup hotspot the firmware opens when it has no saved WiFi (see
+/// `camtest.cpp` AP_SSID / AP_PASS). Shown in the connect UI so the user knows
+/// which network to join and its password.
+const String kSetupApSsid = 'bike-assist-setup';
+const String kSetupApPassword = 'bikeassist';
+
 /// Sends the target WiFi credentials to the ESP32 setup AP over HTTP.
 /// The firmware tries to connect (up to ~12s) before responding, so the
 /// timeout here is deliberately generous.

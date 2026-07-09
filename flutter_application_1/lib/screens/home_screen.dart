@@ -1,11 +1,12 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../models/bike_data.dart';
-import '../services/bike_data_service.dart';
+import '../services/bike_data_source.dart';
 import '../services/camera_source.dart';
+import '../services/device_provisioning.dart';
 import '../services/ride_frame_store.dart';
 import '../services/ride_recorder.dart';
 import '../services/ride_repository.dart';
@@ -19,14 +20,14 @@ import 'ride_list_screen.dart';
 class HomeScreen extends StatefulWidget {
   const HomeScreen({
     super.key,
-    required this.dataService,
+    required this.dataSource,
     required this.cameraSource,
     required this.repository,
     required this.frameStore,
     required this.recorder,
   });
 
-  final BikeDataService dataService;
+  final BikeDataSource dataSource;
   final CameraSource cameraSource;
   final RideRepository repository;
   final RideFrameStore frameStore;
@@ -60,13 +61,15 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
+  /// Connects both the camera (`/stream`) and the telemetry (`/api/status`)
+  /// to the same device. Accepts a bare IP/host, `host:port`, or a full URL.
   void _connectToDevice(String input) {
     final trimmed = input.trim();
     if (trimmed.isEmpty) return;
-    final uri = trimmed.startsWith('http')
-        ? Uri.parse(trimmed)
-        : Uri.parse('http://$trimmed/stream');
-    widget.cameraSource.connect(uri);
+    final normalized = trimmed.startsWith('http') ? trimmed : 'http://$trimmed';
+    final base = Uri.parse(normalized).replace(path: '', query: '', fragment: '');
+    widget.cameraSource.connect(base.replace(path: '/stream'));
+    widget.dataSource.connect(base);
   }
 
   Future<void> _showConnectDialog() async {
@@ -86,6 +89,8 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               keyboardType: TextInputType.url,
             ),
+            const SizedBox(height: 16),
+            const _SetupHotspotInfo(),
             const SizedBox(height: 8),
             TextButton.icon(
               icon: const Icon(Icons.settings_ethernet, size: 18),
@@ -109,6 +114,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (result == null) return;
     if (result == 'mock') {
       widget.cameraSource.useMock();
+      widget.dataSource.useMock();
     } else if (result == 'setup') {
       await _openDeviceSetup();
     } else {
@@ -200,7 +206,7 @@ class _HomeScreenState extends State<HomeScreen> {
           Expanded(
             flex: 6,
             child: StreamBuilder<BikeData>(
-              stream: widget.dataService.stream,
+              stream: widget.dataSource.stream,
               builder: (context, snapshot) {
                 final data = snapshot.data;
                 if (data == null) {
@@ -211,7 +217,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   children: [
                     Row(
                       mainAxisAlignment: MainAxisAlignment.end,
-                      children: const [_ConnectionChip()],
+                      children: [_ConnectionChip(dataSource: widget.dataSource)],
                     ),
                     const SizedBox(height: 8),
                     Center(child: SpeedGauge(speedKmh: data.speedKmh)),
@@ -288,15 +294,108 @@ class _HomeScreenState extends State<HomeScreen> {
       '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')}';
 }
 
-class _ConnectionChip extends StatelessWidget {
-  const _ConnectionChip();
+/// Shows the firmware's setup hotspot name and password inside the connect
+/// dialog, so the user knows which WiFi to join to provision the device.
+/// Each value can be tapped to copy it to the clipboard.
+class _SetupHotspotInfo extends StatelessWidget {
+  const _SetupHotspotInfo();
 
   @override
   Widget build(BuildContext context) {
-    return const Chip(
-      avatar: Icon(Icons.circle, size: 12, color: Colors.green),
-      label: Text('模擬資料連線中'),
-      visualDensity: VisualDensity.compact,
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.wifi_tethering, size: 16, color: theme.colorScheme.primary),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text('裝置設定熱點', style: theme.textTheme.labelLarge),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          _CopyableField(label: '熱點名稱', value: kSetupApSsid),
+          const SizedBox(height: 4),
+          _CopyableField(label: '密碼', value: kSetupApPassword),
+        ],
+      ),
+    );
+  }
+}
+
+/// A label + monospace value row that copies the value to the clipboard on tap.
+class _CopyableField extends StatelessWidget {
+  const _CopyableField({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return InkWell(
+      borderRadius: BorderRadius.circular(4),
+      onTap: () async {
+        await Clipboard.setData(ClipboardData(text: value));
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('已複製$label:$value'), duration: const Duration(seconds: 1)),
+        );
+      },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Row(
+          children: [
+            SizedBox(width: 64, child: Text(label, style: theme.textTheme.bodySmall)),
+            Expanded(
+              child: SelectableText(
+                value,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  fontFamily: 'monospace',
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            Icon(Icons.copy, size: 14, color: theme.colorScheme.outline),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Reflects the telemetry (dashboard data) connection: mock vs. a real device
+/// polling `/api/status`. Separate from the camera status chip on the video.
+class _ConnectionChip extends StatelessWidget {
+  const _ConnectionChip({required this.dataSource});
+
+  final BikeDataSource dataSource;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<TelemetryMode>(
+      valueListenable: dataSource.mode,
+      builder: (context, mode, _) {
+        final (color, label) = switch (mode) {
+          TelemetryMode.mock => (Colors.green, '模擬資料連線中'),
+          TelemetryMode.connecting => (Colors.blue, '數據連線中...'),
+          TelemetryMode.connected => (Colors.green, '裝置數據連線中'),
+          TelemetryMode.error => (Colors.red, '數據連線失敗'),
+        };
+        return Chip(
+          avatar: Icon(Icons.circle, size: 12, color: color),
+          label: Text(label),
+          visualDensity: VisualDensity.compact,
+        );
+      },
     );
   }
 }

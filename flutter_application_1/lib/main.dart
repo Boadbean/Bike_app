@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'screens/home_screen.dart';
-import 'services/bike_data_service.dart';
+import 'services/bike_data_source.dart';
 import 'services/camera_source.dart';
 import 'services/ride_frame_store.dart';
 import 'services/ride_recorder.dart';
@@ -33,12 +33,12 @@ class BikeAssistApp extends StatefulWidget {
 }
 
 class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserver {
-  late final BikeDataService _dataService = MockBikeDataService();
+  late final BikeDataSource _dataSource = BikeDataSource();
   late final CameraSource _cameraSource = CameraSource();
   late final RideRepository _repository = widget.repository ?? RideRepository();
   late final RideFrameStore _frameStore = widget.frameStore ?? RideFrameStore();
   late final RideRecorder _recorder = RideRecorder(
-    dataService: _dataService,
+    dataService: _dataSource,
     repository: _repository,
     cameraSource: _cameraSource,
     frameStore: _frameStore,
@@ -63,7 +63,7 @@ class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserv
     WidgetsBinding.instance.removeObserver(this);
     _recorder.dispose();
     _cameraSource.dispose();
-    _dataService.dispose();
+    _dataSource.dispose();
     _repository.close();
     super.dispose();
   }
@@ -77,7 +77,7 @@ class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserv
         useMaterial3: true,
       ),
       home: HomeScreen(
-        dataService: _dataService,
+        dataSource: _dataSource,
         cameraSource: _cameraSource,
         repository: _repository,
         frameStore: _frameStore,

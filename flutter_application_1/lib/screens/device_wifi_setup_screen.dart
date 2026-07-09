@@ -100,7 +100,7 @@ class _DeviceWifiSetupScreenState extends State<DeviceWifiSetupScreen> {
                     ],
                   ),
                   const SizedBox(height: 8),
-                  const Text('1. 先到手機 WiFi 設定,連上熱點 bike-assist-setup(密碼 bikeassist)'),
+                  const Text('1. 先到手機 WiFi 設定,連上熱點 $kSetupApSsid(密碼 $kSetupApPassword)'),
                   const SizedBox(height: 4),
                   const Text('2. 回到這裡,輸入你要讓裝置連上的網路帳密並送出'),
                   const SizedBox(height: 4),
