@@ -17,6 +17,11 @@ import 'device_wifi_setup_screen.dart';
 import 'no_connection_view.dart';
 import 'ride_list_screen.dart';
 
+/// Port the firmware serves the MJPEG `/stream` from — a second HTTP server,
+/// separate from the port-80 control/telemetry server, so the blocking stream
+/// loop can't starve `/api/status`. Must match the firmware's stream server.
+const int _kCameraPort = 81;
+
 /// Single-page layout: camera stream on top, live dashboard below.
 class HomeScreen extends StatefulWidget {
   const HomeScreen({
@@ -62,14 +67,19 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  /// Connects both the camera (`/stream`) and the telemetry (`/api/status`)
-  /// to the same device. Accepts a bare IP/host, `host:port`, or a full URL.
+  /// Connects the camera and the telemetry to the same device. Accepts a bare
+  /// IP/host, `host:port`, or a full URL.
+  ///
+  /// The two live on separate ports on purpose: the firmware serves the MJPEG
+  /// `/stream` from a second HTTP server on port [_kCameraPort] so its blocking
+  /// stream loop can't starve `/api/status`, which stays on the control port
+  /// (80 by default, or whatever the user typed).
   void _connectToDevice(String input) {
     final trimmed = input.trim();
     if (trimmed.isEmpty) return;
     final normalized = trimmed.startsWith('http') ? trimmed : 'http://$trimmed';
     final base = Uri.parse(normalized).replace(path: '', query: '', fragment: '');
-    widget.cameraSource.connect(base.replace(path: '/stream'));
+    widget.cameraSource.connect(base.replace(port: _kCameraPort, path: '/stream'));
     widget.dataSource.connect(base);
   }
 
