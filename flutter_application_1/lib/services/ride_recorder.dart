@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../models/bike_data.dart';
 import '../models/route_point.dart';
 import 'bike_data_service.dart';
 import 'camera_source.dart';
@@ -59,6 +60,9 @@ class RideRecorder {
     _dataSubscription = dataService.stream.listen((data) {
       final id = _currentRideId;
       if (id == null) return;
+      // Skip samples without a GPS fix — a device with no fix reports (0,0),
+      // which would otherwise fill the ride with bogus points off West Africa.
+      if (!_hasGpsFix(data)) return;
       repository.addPoint(
         id,
         RoutePoint(
@@ -75,6 +79,15 @@ class RideRecorder {
 
     isRecording.value = true;
   }
+
+  /// Whether a telemetry sample carries a usable GPS position. The firmware
+  /// reports (0,0) with `fix:false` when it hasn't locked on, so those are not
+  /// recorded as route points.
+  static bool _hasGpsFix(BikeData data) =>
+      (data.gpsFix ?? true) &&
+      data.lat.isFinite &&
+      data.lng.isFinite &&
+      !(data.lat == 0 && data.lng == 0);
 
   void _onCameraFrame(Uint8List bytes) {
     final rideId = _currentRideId;

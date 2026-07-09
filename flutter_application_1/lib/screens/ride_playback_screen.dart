@@ -48,9 +48,12 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen> {
   final ValueNotifier<Duration> _elapsedNotifier = ValueNotifier(Duration.zero);
 
   List<RoutePoint>? _points;
+  List<RoutePoint> _routePoints = const []; // points with a real GPS fix (for the map)
   List<DateTime> _pointTimes = const []; // precomputed; searched every tick
   List<DateTime> _frameTimes = const [];
   List<File> _frameFiles = const [];
+
+  bool get _hasGps => _routePoints.isNotEmpty;
 
   DateTime? _startTime;
   Duration _total = Duration.zero;
@@ -85,8 +88,14 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen> {
       if (frameTimes.isNotEmpty) frameTimes.last,
     ]..sort();
 
+    // Only points with a real GPS fix go on the map. A ride recorded without a
+    // fix has every point at (0,0); feeding those to fitCamera produces a
+    // zero-area bounds → infinite zoom → NaN centre → a hard map crash.
+    final routePoints = points.where(_isPlottable).toList();
+
     setState(() {
       _points = points;
+      _routePoints = routePoints;
       _pointTimes = points.map((p) => p.timestamp).toList(growable: false);
       _frameTimes = frameTimes;
       _frameFiles = files;
@@ -94,18 +103,45 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen> {
       _total = times.isEmpty ? Duration.zero : times.last.difference(times.first);
     });
 
-    if (points.isNotEmpty) {
-      final bounds = LatLngBounds.fromPoints(
-        points.map((p) => LatLng(p.lat, p.lng)).toList(),
-      );
+    if (routePoints.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        _mapController.fitCamera(
-          CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(32)),
-        );
+        _fitRoute(routePoints);
       });
     }
     _syncTo(Duration.zero);
+  }
+
+  /// A point is plottable only if it carries a real GPS fix. (0,0) is what the
+  /// firmware reports when it has no fix, so those are excluded from the map.
+  static bool _isPlottable(RoutePoint p) =>
+      p.lat.isFinite &&
+      p.lng.isFinite &&
+      p.lat.abs() <= 90 &&
+      p.lng.abs() <= 180 &&
+      !(p.lat == 0 && p.lng == 0);
+
+  /// Fits the map to the recorded route, guarding the degenerate case where the
+  /// ride never moved (a single point, or every point identical). fitCamera on
+  /// a zero-area bounds computes an infinite zoom → NaN centre → map crash, so
+  /// fall back to a plain move there. [maxZoom] also caps a tiny-but-nonzero
+  /// spread from zooming absurdly far in.
+  void _fitRoute(List<RoutePoint> pts) {
+    final latLngs = pts.map((p) => LatLng(p.lat, p.lng)).toList();
+    final bounds = LatLngBounds.fromPoints(latLngs);
+    final spans = (bounds.north - bounds.south).abs() > 1e-6 ||
+        (bounds.east - bounds.west).abs() > 1e-6;
+    if (!spans) {
+      _mapController.move(latLngs.first, 16);
+      return;
+    }
+    _mapController.fitCamera(
+      CameraFit.bounds(
+        bounds: bounds,
+        padding: const EdgeInsets.all(32),
+        maxZoom: 18,
+      ),
+    );
   }
 
   bool get _playing => _timer != null;
@@ -166,10 +202,15 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen> {
       final clamped = index < 0 ? 0 : index;
       if (clamped != _pointIndex.value) {
         _pointIndex.value = clamped;
-        _mapController.move(
-          LatLng(points[clamped].lat, points[clamped].lng),
-          _mapController.camera.zoom,
-        );
+        // Only drive the map when it's actually on screen (i.e. the ride has a
+        // GPS fix) and the current point is plottable — moving to (0,0) would
+        // jump to the ocean, and the controller isn't attached without a map.
+        if (_hasGps && _isPlottable(points[clamped])) {
+          _mapController.move(
+            LatLng(points[clamped].lat, points[clamped].lng),
+            _mapController.camera.zoom,
+          );
+        }
       }
     }
   }
@@ -218,12 +259,15 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen> {
       ),
       body: points == null
           ? const Center(child: CircularProgressIndicator())
-          : points.isEmpty
-              ? const Center(child: Text('這筆紀錄尚無資料點'))
+          : (points.isEmpty && _frameFiles.isEmpty)
+              ? const Center(child: Text('這筆紀錄尚無資料'))
               : Column(
                   children: [
                     Expanded(flex: 4, child: _buildCameraPanel()),
-                    Expanded(flex: 6, child: _buildMap(points)),
+                    Expanded(
+                      flex: 6,
+                      child: _hasGps ? _buildMap(points) : _buildNoGpsPanel(),
+                    ),
                     _buildReadout(points),
                     _buildControls(),
                     const SizedBox(height: 8),
@@ -270,8 +314,10 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen> {
       builder: (context, index, _) => FlutterMap(
         mapController: _mapController,
         options: MapOptions(
-          initialCenter: LatLng(points.first.lat, points.first.lng),
+          initialCenter: LatLng(_routePoints.first.lat, _routePoints.first.lng),
           initialZoom: 15,
+          minZoom: 3,
+          maxZoom: 18, // never let a fit compute an unbounded (crashing) zoom
         ),
         children: [
           TileLayer(
@@ -313,6 +359,32 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen> {
     );
   }
 
+  Widget _buildNoGpsPanel() {
+    final theme = Theme.of(context);
+    return ColoredBox(
+      color: theme.colorScheme.surfaceContainerHighest,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.location_off, size: 40, color: theme.colorScheme.outline),
+              const SizedBox(height: 12),
+              Text('此段記錄沒有 GPS 定位',
+                  style: theme.textTheme.titleMedium, textAlign: TextAlign.center),
+              const SizedBox(height: 4),
+              Text('錄影仍可正常回放。',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                  textAlign: TextAlign.center),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildReadout(List<RoutePoint> points) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -325,8 +397,10 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen> {
               Text(_formatClock(elapsed)),
               const Text(' / '),
               Text(_formatClock(_total)),
-              const SizedBox(width: 16),
-              Text('${points[index].speedKmh.toStringAsFixed(1)} km/h'),
+              if (points.isNotEmpty) ...[
+                const SizedBox(width: 16),
+                Text('${points[index].speedKmh.toStringAsFixed(1)} km/h'),
+              ],
               const Spacer(),
               if (_frameFiles.isNotEmpty)
                 Text('${_frameFiles.length} 影格',

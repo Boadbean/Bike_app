@@ -42,6 +42,11 @@ class BikeData {
   /// Whether the GPS currently has a valid fix.
   final bool? gpsFix;
 
+  /// Count of NMEA characters the firmware has parsed from the GPS module.
+  /// 0 while connected means no data is reaching the ESP32 (wiring), whereas a
+  /// rising count with [gpsFix] false means it's receiving but not yet locked.
+  final int? gpsChars;
+
   const BikeData({
     required this.ax,
     required this.ay,
@@ -60,6 +65,7 @@ class BikeData {
     this.ledDirection,
     this.ledManual,
     this.gpsFix,
+    this.gpsChars,
   });
 
   /// Lean angle derived from the accelerometer, in degrees.
@@ -104,6 +110,7 @@ class BikeData {
       ledDirection: led['direction'] as String?,
       ledManual: led['manual'] as bool?,
       gpsFix: gps['fix'] as bool?,
+      gpsChars: (gps['chars'] as num?)?.toInt(),
     );
   }
 }

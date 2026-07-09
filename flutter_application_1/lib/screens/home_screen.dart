@@ -255,9 +255,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 return ListView(
                   padding: const EdgeInsets.all(16),
                   children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [_ConnectionChip(dataSource: widget.dataSource)],
+                    Wrap(
+                      alignment: WrapAlignment.end,
+                      spacing: 8,
+                      runSpacing: 4,
+                      children: [
+                        _GpsChip(data: data),
+                        _ConnectionChip(dataSource: widget.dataSource),
+                      ],
                     ),
                     const SizedBox(height: 8),
                     Center(child: SpeedGauge(speedKmh: data.speedKmh)),
@@ -408,6 +413,44 @@ class _CopyableField extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Shows the device's GPS state from the latest telemetry, to make it obvious
+/// whether a fix has been acquired (rides need a fix to plot a route):
+/// green = locked, orange = receiving NMEA but searching, red = no data.
+class _GpsChip extends StatelessWidget {
+  const _GpsChip({required this.data});
+
+  final BikeData data;
+
+  @override
+  Widget build(BuildContext context) {
+    final fix = data.gpsFix;
+    final chars = data.gpsChars;
+
+    final Color color;
+    final String label;
+    final IconData icon;
+    if (fix == true) {
+      color = Colors.green;
+      label = 'GPS 已定位';
+      icon = Icons.gps_fixed;
+    } else if (chars != null && chars > 0) {
+      color = Colors.orange;
+      label = 'GPS 搜尋中';
+      icon = Icons.gps_not_fixed;
+    } else {
+      color = Colors.red;
+      label = 'GPS 無訊號';
+      icon = Icons.gps_off;
+    }
+
+    return Chip(
+      avatar: Icon(icon, size: 14, color: color),
+      label: Text(label),
+      visualDensity: VisualDensity.compact,
     );
   }
 }

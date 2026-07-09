@@ -28,9 +28,31 @@ class _FakeBikeDataService implements BikeDataService {
   @override
   Stream<BikeData> get stream => _controller.stream;
 
+  void emit(BikeData data) => _controller.add(data);
+
   @override
   void dispose() => _controller.close();
 }
+
+BikeData _bikeAt({
+  required double lat,
+  required double lng,
+  bool? fix,
+  DateTime? at,
+}) =>
+    BikeData(
+      ax: 0,
+      ay: 0,
+      az: 1,
+      gx: 0,
+      gy: 0,
+      gz: 0,
+      lat: lat,
+      lng: lng,
+      speedKmh: 10,
+      timestamp: at ?? DateTime.now(),
+      gpsFix: fix,
+    );
 
 void main() {
   setUpAll(() {
@@ -420,6 +442,7 @@ void main() {
       expect(data.ledDirection, 'LEFT');
       expect(data.ledManual, isFalse);
       expect(data.gpsFix, isTrue);
+      expect(data.gpsChars, 1234);
     });
 
     test('missing objects default numbers to 0 and extras to null', () {
@@ -471,6 +494,48 @@ void main() {
       addTearDown(service.dispose);
 
       await expectLater(service.stream.first, throwsA(isA<String>()));
+    });
+  });
+
+  group('RideRecorder GPS filtering', () {
+    late RideRepository repository;
+    late _FakeBikeDataService data;
+    late CameraSource cameraSource;
+    late RideRecorder recorder;
+
+    setUp(() {
+      repository = RideRepository(path: inMemoryDatabasePath);
+      data = _FakeBikeDataService();
+      cameraSource = CameraSource();
+      recorder = RideRecorder(
+        dataService: data,
+        repository: repository,
+        cameraSource: cameraSource,
+        frameStore: RideFrameStore(baseDir: Directory.systemTemp),
+      );
+    });
+
+    tearDown(() async {
+      recorder.dispose();
+      cameraSource.dispose();
+      data.dispose();
+      await repository.close();
+    });
+
+    test('records fixed points but skips no-fix (0,0) samples', () async {
+      await recorder.start();
+      final rideId = (await repository.listRides()).first.id;
+
+      data.emit(_bikeAt(lat: 0, lng: 0, fix: false)); // no fix → skipped
+      data.emit(_bikeAt(lat: 25.0, lng: 121.0, fix: true)); // recorded
+      data.emit(_bikeAt(lat: 0, lng: 0, fix: false)); // no fix → skipped
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      await recorder.stop();
+
+      final points = await repository.loadPoints(rideId);
+      expect(points, hasLength(1));
+      expect(points.single.lat, 25.0);
+      expect(points.single.lng, 121.0);
     });
   });
 }
