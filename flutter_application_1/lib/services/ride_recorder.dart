@@ -37,6 +37,10 @@ class RideRecorder {
 
   final ValueNotifier<bool> isRecording = ValueNotifier(false);
 
+  /// The ride currently being recorded, or null when not recording. Used to
+  /// tell a genuinely in-progress ride apart from an orphan left by a crash.
+  int? get currentRideId => _currentRideId;
+
   int? _currentRideId;
   StreamSubscription? _dataSubscription;
   StreamSubscription<Uint8List>? _frameSubscription;

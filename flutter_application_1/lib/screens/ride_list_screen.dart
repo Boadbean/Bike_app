@@ -41,6 +41,11 @@ class _RideListScreenState extends State<RideListScreen> {
   }
 
   Future<void> _load() async {
+    // Close any ride orphaned by a crash / force-kill so it never lingers as
+    // "記錄中", but leave the one that's genuinely recording right now open.
+    final activeId =
+        widget.recorder.isRecording.value ? widget.recorder.currentRideId : null;
+    await widget.repository.closeOrphanRides(exceptRideId: activeId);
     final rides = await widget.repository.listRides();
     if (!mounted) return;
     setState(() => _rides = rides);

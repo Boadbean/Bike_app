@@ -146,6 +146,21 @@ void main() {
       expect(rides.single.isActive, isFalse);
       expect(rides.single.endTime, DateTime(2026, 1, 1, 8, 3));
     });
+
+    test('closeOrphanRides leaves the currently-recording ride open', () async {
+      final active = await repository.startRide(at: DateTime(2026, 1, 1, 9));
+      final orphan = await repository.startRide(at: DateTime(2026, 1, 1, 8));
+      await repository.addPoint(
+        orphan,
+        RoutePoint(lat: 25, lng: 121, speedKmh: 10, timestamp: DateTime(2026, 1, 1, 8, 5)),
+      );
+
+      await repository.closeOrphanRides(exceptRideId: active);
+
+      final rides = await repository.listRides();
+      expect(rides.firstWhere((r) => r.id == active).isActive, isTrue);
+      expect(rides.firstWhere((r) => r.id == orphan).isActive, isFalse);
+    });
   });
 
   testWidgets('leaving the list screen while stopped prompts to restart', (tester) async {

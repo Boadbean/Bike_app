@@ -174,11 +174,15 @@ class RideRepository {
   /// that never got a clean shutdown (e.g. the process was killed outright).
   /// Each orphan is stamped with the timestamp of its last recorded point
   /// (or its own start time if it has no points at all).
-  Future<void> closeOrphanRides() async {
+  ///
+  /// [exceptRideId] is left open — pass the ride that is *currently* recording
+  /// so it keeps showing as in-progress; every other open ride is closed.
+  Future<void> closeOrphanRides({int? exceptRideId}) async {
     final db = await _database;
     final orphans = await db.query('rides', where: 'end_time IS NULL');
     for (final row in orphans) {
       final rideId = row['id'] as int;
+      if (rideId == exceptRideId) continue;
       final lastPoint = await db.query(
         'ride_points',
         where: 'ride_id = ?',
