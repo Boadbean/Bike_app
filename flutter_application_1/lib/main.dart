@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'screens/home_screen.dart';
 import 'services/bike_data_source.dart';
 import 'services/camera_source.dart';
+import 'services/recording_keep_alive.dart';
 import 'services/ride_frame_store.dart';
 import 'services/ride_recorder.dart';
 import 'services/ride_repository.dart';
@@ -16,12 +17,17 @@ class BikeAssistApp extends StatefulWidget {
     super.key,
     this.repository,
     this.frameStore,
+    this.keepAlive,
     this.recordingEnabled = true,
   });
 
   /// Injectable so tests can supply an in-memory database / temp directory.
   final RideRepository? repository;
   final RideFrameStore? frameStore;
+
+  /// Holds the process open while recording so the screen can be off. Defaults
+  /// to the Android foreground service, and to a no-op on every other platform.
+  final RecordingKeepAlive? keepAlive;
 
   /// Enables ride recording: cleans up orphaned rides on launch and records
   /// while a device is connected. Widget tests turn this off — recording
@@ -45,6 +51,8 @@ class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserv
     cameraSource: _cameraSource,
     frameStore: _frameStore,
   );
+  late final RecordingKeepAlive _keepAlive =
+      widget.keepAlive ?? RecordingKeepAlive.forPlatform();
 
   @override
   void initState() {
@@ -56,6 +64,20 @@ class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserv
       _repository.closeOrphanRides();
       _cameraSource.mode.addListener(_syncRecordingWithConnection);
       _dataSource.mode.addListener(_syncRecordingWithConnection);
+      _recorder.isRecording.addListener(_syncKeepAliveWithRecording);
+    }
+  }
+
+  /// Runs the foreground service for exactly as long as a ride is recording:
+  /// without it Android freezes this process when the screen goes off and the
+  /// ride stops capturing. Driven off [RideRecorder.isRecording] rather than the
+  /// connection so it also covers a recording started by hand from the history
+  /// screen.
+  void _syncKeepAliveWithRecording() {
+    if (_recorder.isRecording.value) {
+      _keepAlive.start();
+    } else {
+      _keepAlive.stop();
     }
   }
 
@@ -87,6 +109,8 @@ class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserv
     WidgetsBinding.instance.removeObserver(this);
     _cameraSource.mode.removeListener(_syncRecordingWithConnection);
     _dataSource.mode.removeListener(_syncRecordingWithConnection);
+    _recorder.isRecording.removeListener(_syncKeepAliveWithRecording);
+    _keepAlive.stop();
     _recorder.dispose();
     _cameraSource.dispose();
     _dataSource.dispose();

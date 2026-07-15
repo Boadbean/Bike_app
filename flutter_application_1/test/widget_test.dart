@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -17,6 +17,7 @@ import 'package:flutter_application_1/services/bike_data_service.dart';
 import 'package:flutter_application_1/services/camera_source.dart';
 import 'package:flutter_application_1/services/http_status_bike_data_service.dart';
 import 'package:flutter_application_1/services/device_provisioning.dart';
+import 'package:flutter_application_1/services/recording_keep_alive.dart';
 import 'package:flutter_application_1/services/ride_frame_store.dart';
 import 'package:flutter_application_1/services/ride_recorder.dart';
 import 'package:flutter_application_1/services/ride_repository.dart';
@@ -551,6 +552,20 @@ void main() {
       expect(points, hasLength(1));
       expect(points.single.lat, 25.0);
       expect(points.single.lng, 121.0);
+    });
+  });
+
+  group('RecordingKeepAlive.forPlatform', () {
+    tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+    test('uses the Android foreground service on Android', () {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      expect(RecordingKeepAlive.forPlatform(), isA<ForegroundServiceKeepAlive>());
+    });
+
+    test('is a no-op elsewhere, so tests and desktop never call the plugin', () {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      expect(RecordingKeepAlive.forPlatform(), isA<NoopKeepAlive>());
     });
   });
 }
