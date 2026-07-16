@@ -41,6 +41,23 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- "Open with bike-assist": a .zip tapped in a file manager. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="content" android:mimeType="application/zip"/>
+                <data android:scheme="content" android:mimeType="application/x-zip-compressed"/>
+                <data android:scheme="file" android:mimeType="application/zip"/>
+                <data android:scheme="file" android:mimeType="application/x-zip-compressed"/>
+            </intent-filter>
+            <!-- "Share to bike-assist": a .zip sent from a chat / mail app. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="application/zip"/>
+                <data android:mimeType="application/x-zip-compressed"/>
+            </intent-filter>
         </activity>
         <!-- Holds the process open while recording. "connectedDevice" is the
              type for talking to an external device over a network connection,

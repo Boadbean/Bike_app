@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -17,6 +18,7 @@ import 'package:flutter_application_1/services/bike_data_service.dart';
 import 'package:flutter_application_1/services/camera_source.dart';
 import 'package:flutter_application_1/services/http_status_bike_data_service.dart';
 import 'package:flutter_application_1/services/device_provisioning.dart';
+import 'package:flutter_application_1/services/import_intent_channel.dart';
 import 'package:flutter_application_1/services/recording_keep_alive.dart';
 import 'package:flutter_application_1/services/ride_archive_service.dart';
 import 'package:flutter_application_1/services/ride_frame_store.dart';
@@ -57,6 +59,8 @@ BikeData _bikeAt({
     );
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   setUpAll(() {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
@@ -638,6 +642,41 @@ void main() {
         service.importRide(bogus.path),
         throwsA(isA<RideArchiveException>()),
       );
+    });
+  });
+
+  group('ImportIntentChannel', () {
+    const channel = MethodChannel('bike_assist/import');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+
+    tearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    test('initialImport returns the path the native side hands over', () async {
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        return call.method == 'getInitialImport' ? '/cache/import.zip' : null;
+      });
+      final ch = ImportIntentChannel(channel: channel);
+      expect(await ch.initialImport(), '/cache/import.zip');
+    });
+
+    test('initialImport is null when the native channel is absent', () async {
+      // No mock handler → MissingPluginException → swallowed to null.
+      final ch = ImportIntentChannel(channel: channel);
+      expect(await ch.initialImport(), isNull);
+    });
+
+    test('onImport fires when the native side pushes a shared file', () async {
+      final ch = ImportIntentChannel(channel: channel);
+      String? received;
+      ch.onImport = (path) => received = path;
+      await messenger.handlePlatformMessage(
+        channel.name,
+        channel.codec
+            .encodeMethodCall(const MethodCall('onImport', '/cache/shared.zip')),
+        (_) {},
+      );
+      expect(received, '/cache/shared.zip');
     });
   });
 

@@ -54,14 +54,25 @@ class HelpScreen extends StatelessWidget {
             ],
           ),
           _HelpSection(
+            icon: Icons.open_in_new,
+            title: '匯入記錄(最簡單)',
+            steps: [
+              '在檔案管理員、LINE 或 Gmail 裡找到那個 .zip 檔。',
+              '點它 →「開啟方式 / 分享」→ 選「bike-assist」。',
+              'App 會自動匯入並顯示「已匯入記錄」,然後跳到歷史記錄頁。',
+            ],
+            note: '這個方式是在檔案管理員/聊天 App 裡操作,有正常的返回鍵,'
+                '不用進系統選檔器。',
+          ),
+          _HelpSection(
             icon: Icons.file_download_outlined,
-            title: '匯入記錄',
+            title: '匯入記錄(從 App 內)',
             steps: [
               '要匯入的 .zip 檔要先存在手機上(別人傳的附件通常在「下載 / '
                   'Download」資料夾)。',
               '在「歷史記錄」頁點右上角的匯入圖示(向下箭頭)。',
-              '在選檔器裡找到那個 .zip 檔並點選 — 找不到就點左上角選單切到'
-                  '「Downloads」,或用搜尋打「bikeride」。',
+              '在系統選檔器裡找到 .zip 並點選 — 找不到就點左上角選單切到'
+                  '「Downloads」。要離開選檔器用手機本身的返回(手勢或 ◁ 鍵)。',
               '匯入會建立一筆全新記錄,不會覆蓋你現有的;完成後會顯示「已匯入記錄」。',
             ],
             note: '只能匯入本 App 匯出的 .zip;其他檔案會提示不是記錄檔。',
