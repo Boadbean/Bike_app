@@ -18,6 +18,7 @@ import 'package:flutter_application_1/services/camera_source.dart';
 import 'package:flutter_application_1/services/http_status_bike_data_service.dart';
 import 'package:flutter_application_1/services/device_provisioning.dart';
 import 'package:flutter_application_1/services/recording_keep_alive.dart';
+import 'package:flutter_application_1/services/ride_archive_service.dart';
 import 'package:flutter_application_1/services/ride_frame_store.dart';
 import 'package:flutter_application_1/services/ride_recorder.dart';
 import 'package:flutter_application_1/services/ride_repository.dart';
@@ -552,6 +553,91 @@ void main() {
       expect(points, hasLength(1));
       expect(points.single.lat, 25.0);
       expect(points.single.lng, 121.0);
+    });
+  });
+
+  group('RideArchiveService export/import round-trip', () {
+    late Directory tmpRoot;
+
+    setUp(() => tmpRoot = Directory.systemTemp.createTempSync('ride_archive_test'));
+    tearDown(() {
+      if (tmpRoot.existsSync()) tmpRoot.deleteSync(recursive: true);
+    });
+
+    test('exports a ride and imports it back with its points and frames',
+        () async {
+      final srcStore = RideFrameStore(baseDir: Directory('${tmpRoot.path}/src'));
+      final srcRepo = RideRepository(path: inMemoryDatabasePath);
+      addTearDown(srcRepo.close);
+
+      // Build a ride: two points and two camera frames.
+      final start = DateTime(2026, 7, 16, 8, 30, 0);
+      final rideId = await srcRepo.startRide(at: start);
+      await srcRepo.addPoint(rideId,
+          RoutePoint(lat: 25.0, lng: 121.0, speedKmh: 12, timestamp: start));
+      await srcRepo.addPoint(
+          rideId,
+          RoutePoint(
+              lat: 25.001,
+              lng: 121.001,
+              speedKmh: 18,
+              timestamp: start.add(const Duration(seconds: 1))));
+      final frameA = start.add(const Duration(milliseconds: 100));
+      final frameB = start.add(const Duration(milliseconds: 900));
+      await srcStore.saveFrame(rideId, Uint8List.fromList([1, 2, 3, 4]), frameA);
+      await srcStore.saveFrame(rideId, Uint8List.fromList([9, 8, 7]), frameB);
+      await srcRepo.addFrames(rideId, [frameA, frameB]);
+      await srcRepo.endRide(rideId, at: start.add(const Duration(seconds: 2)));
+
+      final exporter = RideArchiveService(
+        repository: srcRepo,
+        frameStore: srcStore,
+        workDir: Directory('${tmpRoot.path}/out'),
+      );
+      final zip = await exporter.exportRide(rideId);
+      expect(await zip.exists(), isTrue);
+
+      // Import into a *separate* repository + frame store (a different device).
+      final dstStore = RideFrameStore(baseDir: Directory('${tmpRoot.path}/dst'));
+      final dstRepo = RideRepository(path: inMemoryDatabasePath);
+      addTearDown(dstRepo.close);
+      final importer =
+          RideArchiveService(repository: dstRepo, frameStore: dstStore);
+
+      final newId = await importer.importRide(zip.path);
+
+      final ride = await dstRepo.loadRide(newId);
+      expect(ride, isNotNull);
+      expect(ride!.startTime, start);
+      expect(ride.endTime, start.add(const Duration(seconds: 2)));
+
+      final points = await dstRepo.loadPoints(newId);
+      expect(points, hasLength(2));
+      expect(points.first.lat, 25.0);
+      expect(points.last.speedKmh, 18);
+
+      final frames = await dstRepo.loadFrameTimestamps(newId);
+      expect(frames, hasLength(2));
+      expect(await (await dstStore.frameFile(newId, frameA)).readAsBytes(),
+          [1, 2, 3, 4]);
+      expect(await (await dstStore.frameFile(newId, frameB)).readAsBytes(),
+          [9, 8, 7]);
+    });
+
+    test('rejects a file that is not a ride archive', () async {
+      final bogus = File('${tmpRoot.path}/notazip.zip')
+        ..writeAsBytesSync([0, 1, 2, 3, 4, 5]);
+      final repo = RideRepository(path: inMemoryDatabasePath);
+      addTearDown(repo.close);
+      final service = RideArchiveService(
+        repository: repo,
+        frameStore: RideFrameStore(baseDir: tmpRoot),
+      );
+
+      await expectLater(
+        service.importRide(bogus.path),
+        throwsA(isA<RideArchiveException>()),
+      );
     });
   });
 

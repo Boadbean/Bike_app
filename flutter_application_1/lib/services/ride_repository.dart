@@ -97,6 +97,53 @@ class RideRepository {
     });
   }
 
+  /// Reads a single ride's metadata, or null if it doesn't exist. Used by
+  /// export, which needs the start/end times alongside the points and frames.
+  Future<Ride?> loadRide(int rideId) async {
+    final db = await _database;
+    final rows = await db.query('rides', where: 'id = ?', whereArgs: [rideId], limit: 1);
+    if (rows.isEmpty) return null;
+    final row = rows.first;
+    return Ride(
+      id: row['id'] as int,
+      startTime: DateTime.parse(row['start_time'] as String),
+      endTime: row['end_time'] == null
+          ? null
+          : DateTime.parse(row['end_time'] as String),
+    );
+  }
+
+  /// Inserts an imported ride and all of its points in one transaction, under a
+  /// fresh auto-increment id (the exported id is not reused — it could collide
+  /// with a ride already on this device). Returns the new ride id so the caller
+  /// can write the frame files and index under it. Frame index rows are added
+  /// separately via [addFrames], only for frames whose image actually landed.
+  Future<int> insertImportedRide({
+    required DateTime startTime,
+    DateTime? endTime,
+    required List<RoutePoint> points,
+  }) async {
+    final db = await _database;
+    return db.transaction((txn) async {
+      final rideId = await txn.insert('rides', {
+        'start_time': startTime.toIso8601String(),
+        'end_time': endTime?.toIso8601String(),
+      });
+      final batch = txn.batch();
+      for (final point in points) {
+        batch.insert('ride_points', {
+          'ride_id': rideId,
+          'lat': point.lat,
+          'lng': point.lng,
+          'speed_kmh': point.speedKmh,
+          'timestamp': point.timestamp.toIso8601String(),
+        });
+      }
+      await batch.commit(noResult: true);
+      return rideId;
+    });
+  }
+
   Future<List<Ride>> listRides() async {
     final db = await _database;
     final rows = await db.query('rides', orderBy: 'start_time DESC');

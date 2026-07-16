@@ -1,6 +1,11 @@
+import 'dart:io';
+
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../models/ride.dart';
+import '../services/ride_archive_service.dart';
 import '../services/ride_frame_store.dart';
 import '../services/ride_recorder.dart';
 import '../services/ride_repository.dart';
@@ -33,6 +38,11 @@ class _RideListScreenState extends State<RideListScreen> {
   /// asserts "A dismissed Dismissible widget is still part of the tree" and
   /// flashes a red error screen until the async reload lands.
   List<Ride>? _rides;
+
+  late final RideArchiveService _archive = RideArchiveService(
+    repository: widget.repository,
+    frameStore: widget.frameStore,
+  );
 
   @override
   void initState() {
@@ -101,6 +111,81 @@ class _RideListScreenState extends State<RideListScreen> {
     }
   }
 
+  /// Bundles a ride (route + camera frames) into a `.zip` and hands it to the
+  /// system share sheet, so the user can save it to Files/Drive or send it on.
+  Future<void> _exportRide(Ride ride) async {
+    _showProgress('正在匯出記錄…');
+    File? zip;
+    try {
+      zip = await _archive.exportRide(ride.id);
+    } catch (error) {
+      if (!mounted) return;
+      Navigator.of(context).pop(); // dismiss progress
+      _showMessage('匯出失敗:$error');
+      return;
+    }
+    if (!mounted) return;
+    Navigator.of(context).pop(); // dismiss progress before the share sheet
+    await SharePlus.instance.share(
+      ShareParams(
+        files: [XFile(zip.path, mimeType: 'application/zip')],
+        subject: '${_formatDateTime(ride.startTime)} 的騎乘記錄',
+      ),
+    );
+  }
+
+  /// Lets the user pick a previously exported `.zip` and restores it as a new
+  /// ride (route + camera frames), then refreshes the list.
+  Future<void> _importRide() async {
+    const zipGroup = XTypeGroup(
+      label: '記錄封存檔',
+      extensions: ['zip'],
+      mimeTypes: ['application/zip'],
+    );
+    final picked = await openFile(acceptedTypeGroups: const [zipGroup]);
+    final path = picked?.path;
+    if (path == null) return; // cancelled
+
+    if (!mounted) return;
+    _showProgress('正在匯入記錄…');
+    try {
+      await _archive.importRide(path);
+    } catch (error) {
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      _showMessage('匯入失敗:$error');
+      return;
+    }
+    if (!mounted) return;
+    Navigator.of(context).pop();
+    await _load();
+    _showMessage('已匯入記錄');
+  }
+
+  void _showProgress(String message) {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          content: Row(
+            children: [
+              const CircularProgressIndicator(),
+              const SizedBox(width: 20),
+              Expanded(child: Text(message)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
   Future<bool> _confirmLeaveWithoutRestarting() async {
     final choice = await showDialog<bool>(
       context: context,
@@ -138,7 +223,16 @@ class _RideListScreenState extends State<RideListScreen> {
         }
       },
       child: Scaffold(
-        appBar: AppBar(title: const Text('歷史記錄')),
+        appBar: AppBar(
+          title: const Text('歷史記錄'),
+          actions: [
+            IconButton(
+              tooltip: '匯入記錄',
+              icon: const Icon(Icons.file_download_outlined),
+              onPressed: _importRide,
+            ),
+          ],
+        ),
         body: Column(
           children: [
             _RecordingStatusCard(
@@ -168,6 +262,15 @@ class _RideListScreenState extends State<RideListScreen> {
                         subtitle: Text(
                           ride.isActive ? '記錄中' : _formatDuration(ride.duration),
                         ),
+                        // The in-progress ride can't be exported (it has no end
+                        // time yet); every finished ride gets a share action.
+                        trailing: ride.isActive
+                            ? null
+                            : IconButton(
+                                tooltip: '匯出',
+                                icon: const Icon(Icons.ios_share),
+                                onPressed: () => _exportRide(ride),
+                              ),
                         onTap: () async {
                           await Navigator.of(context).push(
                             MaterialPageRoute(
