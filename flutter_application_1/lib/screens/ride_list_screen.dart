@@ -9,6 +9,7 @@ import '../services/ride_archive_service.dart';
 import '../services/ride_frame_store.dart';
 import '../services/ride_recorder.dart';
 import '../services/ride_repository.dart';
+import 'help_screen.dart';
 import 'ride_playback_screen.dart';
 
 /// Lists every recorded ride and lets the user start/stop the current
@@ -230,6 +231,13 @@ class _RideListScreenState extends State<RideListScreen> {
               tooltip: '匯入記錄',
               icon: const Icon(Icons.file_download_outlined),
               onPressed: _importRide,
+            ),
+            IconButton(
+              tooltip: '使用說明',
+              icon: const Icon(Icons.help_outline),
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const HelpScreen()),
+              ),
             ),
           ],
         ),
