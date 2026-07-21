@@ -7,6 +7,8 @@ import '../models/bike_data.dart';
 import '../services/bike_data_source.dart';
 import '../services/camera_source.dart';
 import '../services/device_provisioning.dart';
+import '../services/emergency_relay_service.dart';
+import '../services/emergency_settings.dart';
 import '../services/ride_frame_store.dart';
 import '../services/ride_recorder.dart';
 import '../services/ride_repository.dart';
@@ -14,6 +16,7 @@ import '../widgets/mjpeg_view.dart';
 import '../widgets/speed_gauge.dart';
 import '../widgets/stat_card.dart';
 import 'device_wifi_setup_screen.dart';
+import 'emergency_settings_screen.dart';
 import 'no_connection_view.dart';
 import 'ride_list_screen.dart';
 
@@ -31,6 +34,8 @@ class HomeScreen extends StatefulWidget {
     required this.repository,
     required this.frameStore,
     required this.recorder,
+    required this.emergencyRelay,
+    required this.emergencySettings,
   });
 
   final BikeDataSource dataSource;
@@ -38,6 +43,8 @@ class HomeScreen extends StatefulWidget {
   final RideRepository repository;
   final RideFrameStore frameStore;
   final RideRecorder recorder;
+  final EmergencyRelayService emergencyRelay;
+  final EmergencySettings emergencySettings;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -47,6 +54,16 @@ class _HomeScreenState extends State<HomeScreen> {
   final _displayController = StreamController<Uint8List>.broadcast();
   final _ipController = TextEditingController();
   StreamSubscription<Uint8List>? _cameraSubscription;
+
+  /// Whether the camera MJPEG stream is turned on. Off by default so connecting
+  /// to a device shows the dashboard without pulling the (bandwidth-heavy) video
+  /// until the user asks for it. Toggling it connects/disconnects the camera.
+  bool _streamingEnabled = false;
+
+  /// Base URI of the currently connected device, kept so the streaming switch
+  /// can bring the camera up/down without re-entering the address. Null when no
+  /// device is connected.
+  Uri? _deviceBase;
 
   /// Display-only: pausing the live view does not pause ride recording.
   bool _paused = false;
@@ -67,31 +84,58 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  /// Connects the camera and the telemetry to the same device. Accepts a bare
-  /// IP/host, `host:port`, or a full URL.
+  /// Connects to a device. Accepts a bare IP/host, `host:port`, or a full URL.
   ///
-  /// The two live on separate ports on purpose: the firmware serves the MJPEG
-  /// `/stream` from a second HTTP server on port [_kCameraPort] so its blocking
-  /// stream loop can't starve `/api/status`, which stays on the control port
-  /// (80 by default, or whatever the user typed).
+  /// Telemetry (`/api/status`, the dashboard) always connects. The camera MJPEG
+  /// stream only connects when streaming is switched on — off by default — so a
+  /// fresh connection doesn't pull video until asked. The two live on separate
+  /// ports on purpose: the firmware serves the MJPEG `/stream` from a second
+  /// HTTP server on port [_kCameraPort] so its blocking stream loop can't starve
+  /// `/api/status`, which stays on the control port (80 by default, or whatever
+  /// the user typed).
   void _connectToDevice(String input) {
     final trimmed = input.trim();
     if (trimmed.isEmpty) return;
     final normalized = trimmed.startsWith('http') ? trimmed : 'http://$trimmed';
     final base = Uri.parse(normalized).replace(path: '', query: '', fragment: '');
-    widget.cameraSource.connect(base.replace(port: _kCameraPort, path: '/stream'));
+    _deviceBase = base;
     widget.dataSource.connect(base);
+    if (_streamingEnabled) {
+      widget.cameraSource.connect(_cameraUri(base));
+    }
   }
+
+  /// The MJPEG stream endpoint for a device [base].
+  Uri _cameraUri(Uri base) =>
+      base.replace(port: _kCameraPort, path: '/stream');
 
   /// Drops both the camera and telemetry connections, returning to the
   /// no-connection view. Recording stops via the connection listener in main.
   void _disconnect() {
+    _deviceBase = null;
     widget.cameraSource.disconnect();
     widget.dataSource.disconnect();
   }
 
+  /// Turns the camera stream on/off. When a device is connected, this connects
+  /// or tears down the MJPEG stream live; the dashboard is unaffected either way.
+  void _setStreamingEnabled(bool enabled) {
+    if (enabled == _streamingEnabled) return;
+    setState(() => _streamingEnabled = enabled);
+    final base = _deviceBase;
+    if (base == null) return; // not connected — takes effect on next connect
+    if (enabled) {
+      widget.cameraSource.connect(_cameraUri(base));
+    } else {
+      _paused = false; // reset display pause so re-enabling starts live
+      widget.cameraSource.disconnect();
+    }
+  }
+
   Future<void> _showConnectDialog() async {
-    final isConnected = widget.cameraSource.mode.value != CameraMode.disconnected;
+    final isConnected =
+        widget.dataSource.mode.value != TelemetryMode.disconnected ||
+            widget.cameraSource.mode.value != CameraMode.disconnected;
     final result = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
@@ -167,6 +211,20 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: _showConnectDialog,
           ),
           IconButton(
+            tooltip: '緊急回報設定',
+            icon: const Icon(Icons.emergency_share_outlined),
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => EmergencySettingsScreen(
+                    service: widget.emergencyRelay,
+                    settings: widget.emergencySettings,
+                  ),
+                ),
+              );
+            },
+          ),
+          IconButton(
             tooltip: '歷史記錄',
             icon: const Icon(Icons.map_outlined),
             onPressed: () {
@@ -183,18 +241,30 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      body: ValueListenableBuilder<CameraMode>(
-        valueListenable: widget.cameraSource.mode,
-        builder: (context, mode, _) {
-          final connectingOrLive =
-              mode == CameraMode.connecting || mode == CameraMode.connected;
-          if (!connectingOrLive) {
+      body: ListenableBuilder(
+        listenable: Listenable.merge(
+          [widget.cameraSource.mode, widget.dataSource.mode],
+        ),
+        builder: (context, _) {
+          final cameraMode = widget.cameraSource.mode.value;
+          final telemetryMode = widget.dataSource.mode.value;
+          // A device is connected as soon as telemetry (or the camera) is up.
+          // The camera can be off (streaming switch) while telemetry is live.
+          final live = telemetryMode == TelemetryMode.connecting ||
+              telemetryMode == TelemetryMode.connected ||
+              cameraMode == CameraMode.connecting ||
+              cameraMode == CameraMode.connected;
+          if (!live) {
+            // Surface whichever side reported the failure that dropped us here.
+            final error = telemetryMode == TelemetryMode.error
+                ? widget.dataSource.errorMessage.value
+                : cameraMode == CameraMode.error
+                    ? widget.cameraSource.errorMessage.value
+                    : null;
             return NoConnectionView(
               onConnect: _showConnectDialog,
               onSetup: _openDeviceSetup,
-              errorMessage: mode == CameraMode.error
-                  ? widget.cameraSource.errorMessage.value
-                  : null,
+              errorMessage: error,
             );
           }
           return _buildLiveLayout(context);
@@ -213,30 +283,44 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  MjpegView(frames: _displayController.stream),
-                  Positioned(
-                    top: 8,
-                    right: 8,
-                    child: ValueListenableBuilder<CameraMode>(
-                      valueListenable: widget.cameraSource.mode,
-                      builder: (context, mode, _) => Chip(
-                        avatar: Icon(
-                          Icons.circle,
-                          size: 12,
-                          color: _statusColor(mode),
+                  if (_streamingEnabled)
+                    MjpegView(frames: _displayController.stream)
+                  else
+                    const _StreamOffView(),
+                  if (_streamingEnabled)
+                    Positioned(
+                      top: 8,
+                      right: 8,
+                      child: ValueListenableBuilder<CameraMode>(
+                        valueListenable: widget.cameraSource.mode,
+                        builder: (context, mode, _) => Chip(
+                          avatar: Icon(
+                            Icons.circle,
+                            size: 12,
+                            color: _statusColor(mode),
+                          ),
+                          label: Text(_statusLabel(mode)),
+                          visualDensity: VisualDensity.compact,
                         ),
-                        label: Text(_statusLabel(mode)),
-                        visualDensity: VisualDensity.compact,
                       ),
                     ),
-                  ),
+                  if (_streamingEnabled)
+                    Positioned(
+                      bottom: 8,
+                      right: 8,
+                      child: FilledButton.icon(
+                        onPressed: _togglePaused,
+                        icon: Icon(_paused ? Icons.play_arrow : Icons.pause),
+                        label: Text(_paused ? '繼續' : '暫停'),
+                      ),
+                    ),
+                  // The streaming switch stays available whether it's on or off.
                   Positioned(
-                    bottom: 8,
-                    right: 8,
-                    child: FilledButton.icon(
-                      onPressed: _togglePaused,
-                      icon: Icon(_paused ? Icons.play_arrow : Icons.pause),
-                      label: Text(_paused ? '繼續' : '暫停'),
+                    top: 8,
+                    left: 8,
+                    child: _StreamToggle(
+                      enabled: _streamingEnabled,
+                      onChanged: _setStreamingEnabled,
                     ),
                   ),
                 ],
@@ -275,11 +359,6 @@ class _HomeScreenState extends State<HomeScreen> {
                       crossAxisSpacing: 12,
                       childAspectRatio: 2.2,
                       children: [
-                        StatCard(
-                          label: '傾角',
-                          value: '${data.leanAngleDeg.toStringAsFixed(1)}°',
-                          icon: Icons.rotate_right,
-                        ),
                         StatCard(
                           label: '最後更新',
                           value: _formatTime(data.timestamp),
@@ -337,6 +416,67 @@ class _HomeScreenState extends State<HomeScreen> {
 
   String _formatTime(DateTime time) =>
       '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')}';
+}
+
+/// The camera-stream on/off switch, overlaid on the video area. A compact pill
+/// so it reads on the black camera background whether the stream is on or off.
+class _StreamToggle extends StatelessWidget {
+  const _StreamToggle({required this.enabled, required this.onChanged});
+
+  final bool enabled;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.only(left: 12, right: 4),
+      decoration: BoxDecoration(
+        color: Colors.black54,
+        borderRadius: BorderRadius.circular(24),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.videocam, size: 16, color: Colors.white),
+          const SizedBox(width: 6),
+          const Text('串流', style: TextStyle(color: Colors.white)),
+          Switch(
+            value: enabled,
+            onChanged: onChanged,
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Placeholder shown in the camera area while the stream is switched off, so the
+/// black panel doesn't look like a failed connection.
+class _StreamOffView extends StatelessWidget {
+  const _StreamOffView();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.videocam_off, size: 48, color: Colors.white54),
+          SizedBox(height: 12),
+          Text(
+            '鏡頭串流已關閉',
+            style: TextStyle(color: Colors.white70, fontSize: 16),
+          ),
+          SizedBox(height: 4),
+          Text(
+            '開啟上方「串流」開關以檢視即時影像',
+            style: TextStyle(color: Colors.white38, fontSize: 13),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// Shows the firmware's setup hotspot name and password inside the connect

@@ -2,8 +2,7 @@ import 'package:flutter/material.dart';
 
 /// A static, scrollable how-to page. It explains the flows that aren't obvious
 /// from the UI alone — connecting, recording with the screen off, and
-/// especially exporting/importing rides (which involves a system share sheet
-/// and file picker outside the app).
+/// exporting a ride as a video + coordinate CSV via the system share sheet.
 class HelpScreen extends StatelessWidget {
   const HelpScreen({super.key});
 
@@ -22,6 +21,8 @@ class HelpScreen extends StatelessWidget {
               '回到主畫面點「連接裝置」,輸入裝置的 IP 位址後按「連線」。',
               '若裝置還沒連上 WiFi,先用對話框裡的「設定裝置連線」把它加入你的 WiFi。',
             ],
+            note: '連上後儀表板(速度/GPS)就會顯示。鏡頭串流「預設關閉」,'
+                '要看即時影像時,打開鏡頭區左上角的「串流」開關即可。',
           ),
           _HelpSection(
             icon: Icons.fiber_manual_record,
@@ -45,37 +46,16 @@ class HelpScreen extends StatelessWidget {
           ),
           _HelpSection(
             icon: Icons.ios_share,
-            title: '匯出記錄(分享 / 備份)',
+            title: '匯出記錄(影片 + 座標)',
             steps: [
               '在「歷史記錄」頁,每筆記錄右側都有分享圖示,點它。',
+              'App 會把當時錄下的鏡頭畫面整理成一個 MP4 影片檔,'
+                  '並把整趟的 GPS 座標整理成一個 CSV 檔。',
               '系統分享面板會打開,選 LINE、Gmail、雲端硬碟,'
-                  '或「儲存到裝置 / Files」。',
-              '匯出的是一個 .zip 檔,裡面包含完整路線和當時錄下的鏡頭畫面。',
+                  '或「儲存到裝置 / Files」,兩個檔案會一起分享出去。',
             ],
-          ),
-          _HelpSection(
-            icon: Icons.open_in_new,
-            title: '匯入記錄(最簡單)',
-            steps: [
-              '在檔案管理員、LINE 或 Gmail 裡找到那個 .zip 檔。',
-              '點它 →「開啟方式 / 分享」→ 選「bike-assist」。',
-              'App 會自動匯入並顯示「已匯入記錄」,然後跳到歷史記錄頁。',
-            ],
-            note: '這個方式是在檔案管理員/聊天 App 裡操作,有正常的返回鍵,'
-                '不用進系統選檔器。',
-          ),
-          _HelpSection(
-            icon: Icons.file_download_outlined,
-            title: '匯入記錄(從 App 內)',
-            steps: [
-              '要匯入的 .zip 檔要先存在手機上(別人傳的附件通常在「下載 / '
-                  'Download」資料夾)。',
-              '在「歷史記錄」頁點右上角的匯入圖示(向下箭頭)。',
-              '在系統選檔器裡找到 .zip 並點選 — 找不到就點左上角選單切到'
-                  '「Downloads」。要離開選檔器用手機本身的返回(手勢或 ◁ 鍵)。',
-              '匯入會建立一筆全新記錄,不會覆蓋你現有的;完成後會顯示「已匯入記錄」。',
-            ],
-            note: '只能匯入本 App 匯出的 .zip;其他檔案會提示不是記錄檔。',
+            note: '這趟若沒有錄到鏡頭畫面,就只會匯出座標 CSV。'
+                'CSV 每一列是:時間、緯度、經度、時速(km/h)。',
           ),
         ],
       ),

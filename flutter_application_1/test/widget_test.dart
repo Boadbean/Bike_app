@@ -3,7 +3,6 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -18,12 +17,13 @@ import 'package:flutter_application_1/services/bike_data_service.dart';
 import 'package:flutter_application_1/services/camera_source.dart';
 import 'package:flutter_application_1/services/http_status_bike_data_service.dart';
 import 'package:flutter_application_1/services/device_provisioning.dart';
-import 'package:flutter_application_1/services/import_intent_channel.dart';
+import 'package:flutter_application_1/services/emergency_relay_service.dart';
 import 'package:flutter_application_1/services/recording_keep_alive.dart';
-import 'package:flutter_application_1/services/ride_archive_service.dart';
+import 'package:flutter_application_1/services/ride_export_service.dart';
 import 'package:flutter_application_1/services/ride_frame_store.dart';
 import 'package:flutter_application_1/services/ride_recorder.dart';
 import 'package:flutter_application_1/services/ride_repository.dart';
+import 'package:flutter_application_1/services/video_encoder.dart';
 import 'package:flutter_application_1/utils/timeline.dart';
 
 class _FakeBikeDataService implements BikeDataService {
@@ -38,6 +38,29 @@ class _FakeBikeDataService implements BikeDataService {
   void dispose() => _controller.close();
 }
 
+/// Stands in for the native encoder: records what it was asked to encode and
+/// writes a placeholder file at [outputPath] so the export's video File exists.
+class _FakeVideoEncoder implements VideoEncoder {
+  bool called = false;
+  List<String>? lastFramePaths;
+  List<int>? lastPtsMs;
+  int? lastFps;
+
+  @override
+  Future<void> encodeJpegsToMp4({
+    required List<String> framePaths,
+    required List<int> ptsMs,
+    required String outputPath,
+    int fps = 15,
+  }) async {
+    called = true;
+    lastFramePaths = framePaths;
+    lastPtsMs = ptsMs;
+    lastFps = fps;
+    await File(outputPath).writeAsBytes(const [0, 0, 0]);
+  }
+}
+
 BikeData _bikeAt({
   required double lat,
   required double lng,
@@ -45,12 +68,6 @@ BikeData _bikeAt({
   DateTime? at,
 }) =>
     BikeData(
-      ax: 0,
-      ay: 0,
-      az: 1,
-      gx: 0,
-      gy: 0,
-      gz: 0,
       lat: lat,
       lng: lng,
       speedKmh: 10,
@@ -444,20 +461,15 @@ void main() {
       'camera': true,
     };
 
-    test('maps core motion and GPS fields (lon -> lng, no gyro)', () {
+    test('maps GPS and speed fields (lon -> lng)', () {
       final data = BikeData.fromStatusJson(status);
-      expect(data.ax, 0.01);
-      expect(data.az, 0.99);
       expect(data.lat, 23.99);
       expect(data.lng, 121.60); // firmware sends longitude as "lon"
       expect(data.speedKmh, 12.5);
-      expect(data.gx, 0); // /api/status carries no gyroscope
     });
 
     test('carries the extra firmware fields through', () {
       final data = BikeData.fromStatusJson(status);
-      expect(data.roll, 1.2);
-      expect(data.pitch, -0.5);
       expect(data.accelEvent, 'BRAKE');
       expect(data.accelMagnitude, 2.3);
       expect(data.ledDirection, 'LEFT');
@@ -470,7 +482,6 @@ void main() {
       final data = BikeData.fromStatusJson(const {});
       expect(data.lat, 0);
       expect(data.speedKmh, 0);
-      expect(data.roll, isNull);
       expect(data.accelEvent, isNull);
       expect(data.ledManual, isNull);
       expect(data.gpsFix, isNull);
@@ -502,7 +513,6 @@ void main() {
       expect(data.lat, 25.0);
       expect(data.lng, 121.5);
       expect(data.speedKmh, 8.0);
-      expect(data.roll, 5.0);
     });
 
     test('forwards a non-200 response as a stream error', () async {
@@ -560,26 +570,26 @@ void main() {
     });
   });
 
-  group('RideArchiveService export/import round-trip', () {
+  group('RideExportService', () {
     late Directory tmpRoot;
 
-    setUp(() => tmpRoot = Directory.systemTemp.createTempSync('ride_archive_test'));
+    setUp(() => tmpRoot = Directory.systemTemp.createTempSync('ride_export_test'));
     tearDown(() {
       if (tmpRoot.existsSync()) tmpRoot.deleteSync(recursive: true);
     });
 
-    test('exports a ride and imports it back with its points and frames',
+    test('writes a coordinate CSV and encodes a video from the frames',
         () async {
-      final srcStore = RideFrameStore(baseDir: Directory('${tmpRoot.path}/src'));
-      final srcRepo = RideRepository(path: inMemoryDatabasePath);
-      addTearDown(srcRepo.close);
+      final store = RideFrameStore(baseDir: Directory('${tmpRoot.path}/src'));
+      final repo = RideRepository(path: inMemoryDatabasePath);
+      addTearDown(repo.close);
 
       // Build a ride: two points and two camera frames.
       final start = DateTime(2026, 7, 16, 8, 30, 0);
-      final rideId = await srcRepo.startRide(at: start);
-      await srcRepo.addPoint(rideId,
+      final rideId = await repo.startRide(at: start);
+      await repo.addPoint(rideId,
           RoutePoint(lat: 25.0, lng: 121.0, speedKmh: 12, timestamp: start));
-      await srcRepo.addPoint(
+      await repo.addPoint(
           rideId,
           RoutePoint(
               lat: 25.001,
@@ -588,95 +598,108 @@ void main() {
               timestamp: start.add(const Duration(seconds: 1))));
       final frameA = start.add(const Duration(milliseconds: 100));
       final frameB = start.add(const Duration(milliseconds: 900));
-      await srcStore.saveFrame(rideId, Uint8List.fromList([1, 2, 3, 4]), frameA);
-      await srcStore.saveFrame(rideId, Uint8List.fromList([9, 8, 7]), frameB);
-      await srcRepo.addFrames(rideId, [frameA, frameB]);
-      await srcRepo.endRide(rideId, at: start.add(const Duration(seconds: 2)));
+      await store.saveFrame(rideId, Uint8List.fromList([1, 2, 3, 4]), frameA);
+      await store.saveFrame(rideId, Uint8List.fromList([9, 8, 7]), frameB);
+      await repo.addFrames(rideId, [frameA, frameB]);
+      await repo.endRide(rideId, at: start.add(const Duration(seconds: 2)));
 
-      final exporter = RideArchiveService(
-        repository: srcRepo,
-        frameStore: srcStore,
+      final encoder = _FakeVideoEncoder();
+      final exporter = RideExportService(
+        repository: repo,
+        frameStore: store,
+        videoEncoder: encoder,
         workDir: Directory('${tmpRoot.path}/out'),
       );
-      final zip = await exporter.exportRide(rideId);
-      expect(await zip.exists(), isTrue);
 
-      // Import into a *separate* repository + frame store (a different device).
-      final dstStore = RideFrameStore(baseDir: Directory('${tmpRoot.path}/dst'));
-      final dstRepo = RideRepository(path: inMemoryDatabasePath);
-      addTearDown(dstRepo.close);
-      final importer =
-          RideArchiveService(repository: dstRepo, frameStore: dstStore);
+      final export = await exporter.exportRide(rideId);
 
-      final newId = await importer.importRide(zip.path);
+      // CSV: header + one row per point, coordinates preserved.
+      final csvLines = (await export.csv.readAsString()).trim().split('\n');
+      expect(csvLines.first, 'timestamp,latitude,longitude,speed_kmh');
+      expect(csvLines, hasLength(3));
+      expect(csvLines[1], contains('25.0000000,121.0000000,12.00'));
+      expect(csvLines[2], contains('25.0010000,121.0010000,18.00'));
 
-      final ride = await dstRepo.loadRide(newId);
-      expect(ride, isNotNull);
-      expect(ride!.startTime, start);
-      expect(ride.endTime, start.add(const Duration(seconds: 2)));
-
-      final points = await dstRepo.loadPoints(newId);
-      expect(points, hasLength(2));
-      expect(points.first.lat, 25.0);
-      expect(points.last.speedKmh, 18);
-
-      final frames = await dstRepo.loadFrameTimestamps(newId);
-      expect(frames, hasLength(2));
-      expect(await (await dstStore.frameFile(newId, frameA)).readAsBytes(),
-          [1, 2, 3, 4]);
-      expect(await (await dstStore.frameFile(newId, frameB)).readAsBytes(),
-          [9, 8, 7]);
+      // Video: encoder was asked to build it from both frames, timed from 0.
+      expect(export.video, isNotNull);
+      expect(await export.video!.exists(), isTrue);
+      expect(encoder.lastFramePaths, hasLength(2));
+      expect(encoder.lastPtsMs, [0, 800]); // relative to the first frame
+      expect(export.files, [export.video, export.csv]);
     });
 
-    test('rejects a file that is not a ride archive', () async {
-      final bogus = File('${tmpRoot.path}/notazip.zip')
-        ..writeAsBytesSync([0, 1, 2, 3, 4, 5]);
+    test('exports CSV only (no video) when the ride has no frames', () async {
+      final store = RideFrameStore(baseDir: Directory('${tmpRoot.path}/src'));
       final repo = RideRepository(path: inMemoryDatabasePath);
       addTearDown(repo.close);
-      final service = RideArchiveService(
+
+      final start = DateTime(2026, 7, 16, 9);
+      final rideId = await repo.startRide(at: start);
+      await repo.addPoint(rideId,
+          RoutePoint(lat: 24.5, lng: 120.9, speedKmh: 5, timestamp: start));
+      await repo.endRide(rideId, at: start.add(const Duration(seconds: 1)));
+
+      final encoder = _FakeVideoEncoder();
+      final exporter = RideExportService(
+        repository: repo,
+        frameStore: store,
+        videoEncoder: encoder,
+        workDir: Directory('${tmpRoot.path}/out'),
+      );
+
+      final export = await exporter.exportRide(rideId);
+
+      expect(export.video, isNull);
+      expect(encoder.called, isFalse); // no frames → encoder never invoked
+      expect(export.files, [export.csv]);
+      expect(await export.csv.exists(), isTrue);
+    });
+
+    test('throws when the ride does not exist', () async {
+      final repo = RideRepository(path: inMemoryDatabasePath);
+      addTearDown(repo.close);
+      final exporter = RideExportService(
         repository: repo,
         frameStore: RideFrameStore(baseDir: tmpRoot),
+        videoEncoder: _FakeVideoEncoder(),
+        workDir: tmpRoot,
       );
 
       await expectLater(
-        service.importRide(bogus.path),
-        throwsA(isA<RideArchiveException>()),
+        exporter.exportRide(999),
+        throwsA(isA<RideExportException>()),
       );
     });
   });
 
-  group('ImportIntentChannel', () {
-    const channel = MethodChannel('bike_assist/import');
-    final messenger =
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  group('FallAlert.tryParse', () {
+    // Builds the exact 13-byte manufacturer payload broadcastFallenBLE emits:
+    // [evt(1) | lat(float32 LE) | lon(float32 LE) | epoch(uint32 LE)].
+    List<int> payload(int evt, double lat, double lon, int epoch) {
+      final b = ByteData(13);
+      b.setUint8(0, evt);
+      b.setFloat32(1, lat, Endian.little);
+      b.setFloat32(5, lon, Endian.little);
+      b.setUint32(9, epoch, Endian.little);
+      return b.buffer.asUint8List();
+    }
 
-    tearDown(() => messenger.setMockMethodCallHandler(channel, null));
-
-    test('initialImport returns the path the native side hands over', () async {
-      messenger.setMockMethodCallHandler(channel, (call) async {
-        return call.method == 'getInitialImport' ? '/cache/import.zip' : null;
-      });
-      final ch = ImportIntentChannel(channel: channel);
-      expect(await ch.initialImport(), '/cache/import.zip');
+    test('decodes a well-formed fall payload', () {
+      final alert = FallAlert.tryParse(payload(0x01, 24.1477, 120.6736, 1752000000),
+          rssi: -60);
+      expect(alert, isNotNull);
+      expect(alert!.lat, closeTo(24.1477, 1e-3)); // float32 precision
+      expect(alert.lon, closeTo(120.6736, 1e-3));
+      expect(alert.epoch, 1752000000);
+      expect(alert.rssi, -60);
     });
 
-    test('initialImport is null when the native channel is absent', () async {
-      // No mock handler → MissingPluginException → swallowed to null.
-      final ch = ImportIntentChannel(channel: channel);
-      expect(await ch.initialImport(), isNull);
+    test('rejects a wrong event type', () {
+      expect(FallAlert.tryParse(payload(0x02, 1, 2, 3)), isNull);
     });
 
-    test('onImport fires when the native side pushes a shared file', () async {
-      final ch = ImportIntentChannel(channel: channel);
-      String? received;
-      ch.onImport = (path) => received = path;
-      await messenger.handlePlatformMessage(
-        channel.name,
-        channel.codec
-            .encodeMethodCall(const MethodCall('onImport', '/cache/shared.zip')),
-        (_) {},
-      );
-      expect(received, '/cache/shared.zip');
+    test('rejects a too-short payload', () {
+      expect(FallAlert.tryParse([0x01, 0x00, 0x00]), isNull);
     });
   });
 

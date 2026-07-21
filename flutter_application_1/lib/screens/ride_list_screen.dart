@@ -1,14 +1,12 @@
-import 'dart:io';
-
-import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../models/ride.dart';
-import '../services/ride_archive_service.dart';
+import '../services/ride_export_service.dart';
 import '../services/ride_frame_store.dart';
 import '../services/ride_recorder.dart';
 import '../services/ride_repository.dart';
+import '../services/video_encoder.dart';
 import 'help_screen.dart';
 import 'ride_playback_screen.dart';
 
@@ -40,9 +38,10 @@ class _RideListScreenState extends State<RideListScreen> {
   /// flashes a red error screen until the async reload lands.
   List<Ride>? _rides;
 
-  late final RideArchiveService _archive = RideArchiveService(
+  late final RideExportService _exporter = RideExportService(
     repository: widget.repository,
     frameStore: widget.frameStore,
+    videoEncoder: MethodChannelVideoEncoder(),
   );
 
   @override
@@ -112,13 +111,15 @@ class _RideListScreenState extends State<RideListScreen> {
     }
   }
 
-  /// Bundles a ride (route + camera frames) into a `.zip` and hands it to the
-  /// system share sheet, so the user can save it to Files/Drive or send it on.
+  /// Exports a ride into a video (MP4, built from its camera frames) and a
+  /// coordinate CSV, then hands both to the system share sheet so the user can
+  /// save them to the gallery/Files or send them on. A ride with no recorded
+  /// footage exports the CSV alone.
   Future<void> _exportRide(Ride ride) async {
-    _showProgress('正在匯出記錄…');
-    File? zip;
+    _showProgress('正在整理影片與座標…');
+    RideExport export;
     try {
-      zip = await _archive.exportRide(ride.id);
+      export = await _exporter.exportRide(ride.id);
     } catch (error) {
       if (!mounted) return;
       Navigator.of(context).pop(); // dismiss progress
@@ -129,38 +130,19 @@ class _RideListScreenState extends State<RideListScreen> {
     Navigator.of(context).pop(); // dismiss progress before the share sheet
     await SharePlus.instance.share(
       ShareParams(
-        files: [XFile(zip.path, mimeType: 'application/zip')],
+        files: [
+          for (final file in export.files)
+            XFile(
+              file.path,
+              mimeType: file.path.endsWith('.mp4') ? 'video/mp4' : 'text/csv',
+            ),
+        ],
         subject: '${_formatDateTime(ride.startTime)} 的騎乘記錄',
       ),
     );
-  }
-
-  /// Lets the user pick a previously exported `.zip` and restores it as a new
-  /// ride (route + camera frames), then refreshes the list.
-  Future<void> _importRide() async {
-    const zipGroup = XTypeGroup(
-      label: '記錄封存檔',
-      extensions: ['zip'],
-      mimeTypes: ['application/zip'],
-    );
-    final picked = await openFile(acceptedTypeGroups: const [zipGroup]);
-    final path = picked?.path;
-    if (path == null) return; // cancelled
-
-    if (!mounted) return;
-    _showProgress('正在匯入記錄…');
-    try {
-      await _archive.importRide(path);
-    } catch (error) {
-      if (!mounted) return;
-      Navigator.of(context).pop();
-      _showMessage('匯入失敗:$error');
-      return;
+    if (mounted && export.video == null) {
+      _showMessage('這趟沒有錄到影像,只匯出座標 CSV');
     }
-    if (!mounted) return;
-    Navigator.of(context).pop();
-    await _load();
-    _showMessage('已匯入記錄');
   }
 
   void _showProgress(String message) {
@@ -227,11 +209,6 @@ class _RideListScreenState extends State<RideListScreen> {
         appBar: AppBar(
           title: const Text('歷史記錄'),
           actions: [
-            IconButton(
-              tooltip: '匯入記錄',
-              icon: const Icon(Icons.file_download_outlined),
-              onPressed: _importRide,
-            ),
             IconButton(
               tooltip: '使用說明',
               icon: const Icon(Icons.help_outline),

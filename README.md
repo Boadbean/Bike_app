@@ -29,7 +29,6 @@ flutter run            # 或 flutter run -d chrome / -d <裝置>
 
 ```
 [ESP32-S3] ──WiFi/HTTP──> [手機 App]
-  ├─ OV2640  → MJPEG /stream          即時鏡頭
-  ├─ MPU6050 → 加速度 / 傾角           儀表板
-  └─ GPS     → 經緯度 / 速度           路線記錄
+  ├─ OV2640  → MJPEG /stream          即時鏡頭 / 匯出影片
+  └─ GPS     → 經緯度 / 速度           儀表板 / 路線記錄 / 匯出座標 CSV
 ```

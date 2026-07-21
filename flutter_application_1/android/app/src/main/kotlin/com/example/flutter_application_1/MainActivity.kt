@@ -1,86 +1,60 @@
 package com.example.flutter_application_1
 
-import android.content.Intent
-import android.net.Uri
-import android.util.Log
+import android.os.Handler
+import android.os.Looper
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
-import java.io.File
 
 /**
- * Receives ride archives opened from (or shared to) the app — a `.zip` tapped
- * in a file manager, or "share to bike-assist" from a chat/mail app. The
- * incoming content:// stream is copied into the app's cache and its path is
- * handed to Flutter over a method channel, which then runs the import. This
- * lets the user import from apps that have their own back button, instead of
- * the system file picker (which has none at its root).
+ * Hosts the native video-encoder method channel. Export bundles a ride's
+ * recorded camera frames into an H.264 MP4 via [VideoEncoder] (MediaCodec +
+ * MediaMuxer); Dart hands over the frame paths and their timestamps and gets
+ * back the finished file's path.
  */
 class MainActivity : FlutterActivity() {
-    private val channelName = "bike_assist/import"
-    private var channel: MethodChannel? = null
-
-    /** Set when the app is cold-started by an intent, before Dart is ready to
-     *  be called; Dart pulls it via `getInitialImport` once it's listening. */
-    private var pendingImportPath: String? = null
+    private val channelName = "bike_assist/video_encoder"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
-        channel!!.setMethodCallHandler { call, result ->
-            if (call.method == "getInitialImport") {
-                result.success(pendingImportPath)
-                pendingImportPath = null
-            } else {
-                result.notImplemented()
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "encodeJpegsToMp4" -> handleEncode(call, result)
+                    else -> result.notImplemented()
+                }
             }
-        }
-        // The intent that launched the process (cold start).
-        pendingImportPath = extractImport(intent)
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        val path = extractImport(intent) ?: return
-        // App already running: deliver straight to Dart, or stash it if the
-        // channel isn't wired yet.
-        val ch = channel
-        if (ch != null) {
-            ch.invokeMethod("onImport", path)
-        } else {
-            pendingImportPath = path
-        }
-    }
+    private fun handleEncode(call: MethodCall, result: MethodChannel.Result) {
+        val framePaths = call.argument<List<String>>("framePaths")
+        val ptsMs = call.argument<List<Number>>("ptsMs")
+        val outputPath = call.argument<String>("outputPath")
+        val fps = call.argument<Int>("fps") ?: 15
 
-    /** Copies a VIEW/SEND zip payload into cache and returns its path, or null
-     *  if this intent doesn't carry one. */
-    private fun extractImport(intent: Intent?): String? {
-        if (intent == null) return null
-        val uri: Uri? = when (intent.action) {
-            Intent.ACTION_VIEW -> intent.data
-            Intent.ACTION_SEND -> {
-                @Suppress("DEPRECATION")
-                intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        if (framePaths.isNullOrEmpty() || ptsMs == null || outputPath == null ||
+            framePaths.size != ptsMs.size
+        ) {
+            result.error(
+                "bad_args",
+                "framePaths/ptsMs/outputPath are required and the two lists must match in length",
+                null,
+            )
+            return
+        }
+
+        val ptsUs = ptsMs.map { it.toLong() * 1000L }
+        val mainHandler = Handler(Looper.getMainLooper())
+        // Encoding is CPU-heavy — run it off the platform thread and post the
+        // result (MethodChannel.Result must be answered on the main thread).
+        Thread {
+            try {
+                VideoEncoder.encode(framePaths, ptsUs, outputPath, fps)
+                mainHandler.post { result.success(outputPath) }
+            } catch (e: Exception) {
+                mainHandler.post { result.error("encode_failed", e.message, null) }
             }
-            else -> null
-        }
-        return if (uri == null) null else copyToCache(uri)
-    }
-
-    private fun copyToCache(uri: Uri): String? {
-        return try {
-            val input = contentResolver.openInputStream(uri) ?: return null
-            val outFile = File(cacheDir, "import_${System.currentTimeMillis()}.zip")
-            input.use { i -> outFile.outputStream().use { o -> i.copyTo(o) } }
-            outFile.absolutePath
-        } catch (e: Exception) {
-            Log.e(TAG, "failed to read shared import $uri", e)
-            null
-        }
-    }
-
-    private companion object {
-        const val TAG = "BikeImport"
+        }.start()
     }
 }

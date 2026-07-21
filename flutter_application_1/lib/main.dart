@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 
 import 'screens/home_screen.dart';
-import 'screens/ride_list_screen.dart';
 import 'services/bike_data_source.dart';
 import 'services/camera_source.dart';
-import 'services/import_intent_channel.dart';
+import 'services/emergency_relay_service.dart';
+import 'services/emergency_settings.dart';
+import 'services/keep_alive_controller.dart';
 import 'services/recording_keep_alive.dart';
-import 'services/ride_archive_service.dart';
 import 'services/ride_frame_store.dart';
 import 'services/ride_recorder.dart';
 import 'services/ride_repository.dart';
@@ -54,16 +54,19 @@ class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserv
     cameraSource: _cameraSource,
     frameStore: _frameStore,
   );
-  late final RecordingKeepAlive _keepAlive =
-      widget.keepAlive ?? RecordingKeepAlive.forPlatform();
-  late final RideArchiveService _archive =
-      RideArchiveService(repository: _repository, frameStore: _frameStore);
-  final ImportIntentChannel _importChannel = ImportIntentChannel();
+  /// Reference-counted so ride recording and the emergency relay can each keep
+  /// the process alive without tearing the shared foreground service out from
+  /// under the other.
+  late final KeepAliveController _keepAlive = KeepAliveController(
+    widget.keepAlive ?? RecordingKeepAlive.forPlatform(),
+  );
+  final EmergencySettings _emergencySettings = const EmergencySettings();
+  late final EmergencyRelayService _emergencyRelay =
+      EmergencyRelayService(_keepAlive);
 
-  /// Lets an import triggered from outside the UI (a shared/opened .zip) show a
-  /// snackbar and navigate to the history list, from above any current screen.
-  final GlobalKey<ScaffoldMessengerState> _messengerKey = GlobalKey();
-  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey();
+  /// Tracks whether recording currently holds the keep-alive, so we release
+  /// exactly the holds we took (recording toggles rapidly).
+  bool _recordingHold = false;
 
   @override
   void initState() {
@@ -77,42 +80,16 @@ class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserv
       _dataSource.mode.addListener(_syncRecordingWithConnection);
       _recorder.isRecording.addListener(_syncKeepAliveWithRecording);
 
-      // Import a .zip the app was opened with, and any shared while it runs.
-      _importChannel.onImport = _handleSharedImport;
-      WidgetsBinding.instance.addPostFrameCallback((_) async {
-        final path = await _importChannel.initialImport();
-        if (path != null) _handleSharedImport(path);
-      });
+      // Resume the emergency BLE relay if it was left armed.
+      WidgetsBinding.instance.addPostFrameCallback((_) => _resumeEmergency());
     }
   }
 
-  /// Imports a ride archive that arrived via "open with / share to bike-assist",
-  /// then drops the user on the history list so they can see it.
-  Future<void> _handleSharedImport(String path) async {
-    final messenger = _messengerKey.currentState;
-    messenger
-      ?..hideCurrentSnackBar()
-      ..showSnackBar(const SnackBar(content: Text('正在匯入記錄…')));
-    try {
-      await _archive.importRide(path);
-    } catch (error) {
-      messenger
-        ?..hideCurrentSnackBar()
-        ..showSnackBar(SnackBar(content: Text('匯入失敗:$error')));
-      return;
+  Future<void> _resumeEmergency() async {
+    final config = await _emergencySettings.load();
+    if (config.enabled && config.serverUrl.isNotEmpty) {
+      await _emergencyRelay.arm(config.serverUrl);
     }
-    messenger
-      ?..hideCurrentSnackBar()
-      ..showSnackBar(const SnackBar(content: Text('已匯入記錄')));
-    _navigatorKey.currentState?.push(
-      MaterialPageRoute(
-        builder: (_) => RideListScreen(
-          repository: _repository,
-          frameStore: _frameStore,
-          recorder: _recorder,
-        ),
-      ),
-    );
   }
 
   /// Runs the foreground service for exactly as long as a ride is recording:
@@ -121,10 +98,13 @@ class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserv
   /// connection so it also covers a recording started by hand from the history
   /// screen.
   void _syncKeepAliveWithRecording() {
-    if (_recorder.isRecording.value) {
-      _keepAlive.start();
-    } else {
-      _keepAlive.stop();
+    final recording = _recorder.isRecording.value;
+    if (recording && !_recordingHold) {
+      _recordingHold = true;
+      _keepAlive.acquire();
+    } else if (!recording && _recordingHold) {
+      _recordingHold = false;
+      _keepAlive.release();
     }
   }
 
@@ -157,7 +137,7 @@ class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserv
     _cameraSource.mode.removeListener(_syncRecordingWithConnection);
     _dataSource.mode.removeListener(_syncRecordingWithConnection);
     _recorder.isRecording.removeListener(_syncKeepAliveWithRecording);
-    _keepAlive.stop();
+    _emergencyRelay.dispose();
     _recorder.dispose();
     _cameraSource.dispose();
     _dataSource.dispose();
@@ -169,8 +149,6 @@ class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserv
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'bike-assist',
-      scaffoldMessengerKey: _messengerKey,
-      navigatorKey: _navigatorKey,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
         useMaterial3: true,
@@ -181,6 +159,8 @@ class _BikeAssistAppState extends State<BikeAssistApp> with WidgetsBindingObserv
         repository: _repository,
         frameStore: _frameStore,
         recorder: _recorder,
+        emergencyRelay: _emergencyRelay,
+        emergencySettings: _emergencySettings,
       ),
     );
   }

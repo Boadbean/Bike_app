@@ -1,32 +1,20 @@
-import 'dart:math' show atan2, pi;
-
 /// Telemetry snapshot matching the ESP32-S3 JSON payload.
 ///
-/// The core motion/position fields come from either the mock generator or the
-/// firmware's `GET /api/status` endpoint. The firmware also reports a handful
-/// of extra fields (filtered roll/pitch, crash/brake event, indicator state).
-/// Those are carried through here so the app *receives* them, but the dashboard
-/// does not display them yet — they're null when the source doesn't provide them
-/// (e.g. the mock).
+/// The core position/speed fields come from the firmware's `GET /api/status`
+/// endpoint. A handful of extra fields (crash/brake event, indicator state,
+/// GPS diagnostics) are carried through so the app *receives* them; they're
+/// null when the source doesn't provide them.
+///
+/// The IMU/gyroscope motion data (raw accel/gyro, filtered roll/pitch, and the
+/// derived lean angle) is no longer received or displayed — the dashboard only
+/// shows speed and GPS position now.
 class BikeData {
-  final double ax;
-  final double ay;
-  final double az;
-  final double gx;
-  final double gy;
-  final double gz;
   final double lat;
   final double lng;
   final double speedKmh;
   final DateTime timestamp;
 
-  // ── Extra firmware telemetry (received, not yet displayed) ──────────────
-  /// Complementary-filtered roll from the firmware, in degrees.
-  final double? roll;
-
-  /// Complementary-filtered pitch from the firmware, in degrees.
-  final double? pitch;
-
+  // ── Extra firmware telemetry (received, not displayed) ──────────────────
   /// Accelerometer event classification: `NORMAL` | `BRAKE` | `COLLISION`.
   final String? accelEvent;
 
@@ -48,18 +36,10 @@ class BikeData {
   final int? gpsChars;
 
   const BikeData({
-    required this.ax,
-    required this.ay,
-    required this.az,
-    required this.gx,
-    required this.gy,
-    required this.gz,
     required this.lat,
     required this.lng,
     required this.speedKmh,
     required this.timestamp,
-    this.roll,
-    this.pitch,
     this.accelEvent,
     this.accelMagnitude,
     this.ledDirection,
@@ -68,23 +48,18 @@ class BikeData {
     this.gpsChars,
   });
 
-  /// Lean angle derived from the accelerometer, in degrees.
-  /// 0° = upright, positive = leaning right, negative = leaning left.
-  double get leanAngleDeg => atan2(ax, az) * 180 / pi;
-
-  /// Parses the firmware's `/api/status` JSON (nested `imu` / `gps` / `accel`
-  /// / `led` objects) into a [BikeData]. Missing numeric fields default to 0;
-  /// the extra fields default to null when absent.
+  /// Parses the firmware's `/api/status` JSON (nested `gps` / `accel` / `led`
+  /// objects) into a [BikeData]. Missing numeric fields default to 0; the extra
+  /// fields default to null when absent.
   ///
-  /// Note: `/api/status` reports acceleration in G and has no gyroscope, so
-  /// [gx]/[gy]/[gz] are set to 0. GPS longitude arrives as `lon`.
+  /// Note: GPS longitude arrives as `lon`. The `imu` object (accel/gyro/roll/
+  /// pitch) is intentionally ignored — the app no longer uses motion data.
   factory BikeData.fromStatusJson(Map<String, dynamic> json, {DateTime? timestamp}) {
     Map<String, dynamic> obj(String key) {
       final value = json[key];
       return value is Map ? value.cast<String, dynamic>() : const {};
     }
 
-    final imu = obj('imu');
     final gps = obj('gps');
     final accel = obj('accel');
     final led = obj('led');
@@ -93,18 +68,10 @@ class BikeData {
     double? numOrNull(dynamic v) => (v as num?)?.toDouble();
 
     return BikeData(
-      ax: num0(imu['ax']),
-      ay: num0(imu['ay']),
-      az: num0(imu['az']),
-      gx: 0,
-      gy: 0,
-      gz: 0,
       lat: num0(gps['lat']),
       lng: num0(gps['lon']),
       speedKmh: num0(gps['speed']),
       timestamp: timestamp ?? DateTime.now(),
-      roll: numOrNull(imu['roll']),
-      pitch: numOrNull(imu['pitch']),
       accelEvent: accel['event'] as String?,
       accelMagnitude: numOrNull(accel['magnitude']),
       ledDirection: led['direction'] as String?,
